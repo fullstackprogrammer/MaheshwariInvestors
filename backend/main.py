@@ -3,6 +3,8 @@ FastAPI Backend for Maheshwari Investor Stock Analysis
 Analyzes investor stock picks and tracks 2026 performance using live market data.
 """
 
+import logging
+import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, date
@@ -14,6 +16,16 @@ import os
 import time
 import threading
 from pathlib import Path
+
+# Logging: INFO only; cache refresh and errors
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+    force=True,
+)
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="Maheshwari Investor Stock Analysis API")
 
@@ -95,13 +107,13 @@ def normalize_symbol(symbol: str) -> str:
     # Apply mapping
     return SYMBOL_MAPPING.get(symbol, symbol)
 
-# In-memory data storage
+# In-memory data storage (shared by all users - no per-user cache)
 investors_data = []
-stock_cache = {}
+stock_cache = {}  # Single global cache: stocks, indices, prices for all users; refreshed every 15 min
 alias_mapping = {}
 
-# Auto-refresh: interval in seconds (5 minutes)
-CACHE_REFRESH_INTERVAL_SEC = 300
+# Auto-refresh: interval in seconds (15 minutes)
+CACHE_REFRESH_INTERVAL_SEC = 900
 _cache_refresh_lock = threading.Lock()
 
 def load_investors_from_csv():
@@ -182,7 +194,7 @@ def load_investors_from_csv():
             "original_name": original_name  # Keep for internal use only
         })
     
-    print(f"Loaded {len(investors_data)} investors from {csv_path.name}")
+    log.info("Loaded %s investors from %s", len(investors_data), csv_path.name)
     return investors_data
 
 def _is_cache_stale(stock_data: Dict) -> bool:
@@ -204,6 +216,8 @@ def _fetch_one_stock_from_api(symbol: str) -> Optional[Dict]:
     symbol = normalize_symbol(symbol)
     if not symbol or len(symbol) < 1 or len(symbol) > 10:
         return None
+    if symbol in ("^DJI", "SPY", "QQQ"):
+        log.info("[Index] yfinance call for index %s", symbol)
     for attempt in range(3):
         try:
             ticker = yf.Ticker(symbol)
@@ -261,55 +275,57 @@ def get_all_symbols() -> List[str]:
     return sorted(symbols)
 
 
+# Benchmark indices (DJIA, S&P 500, Nasdaq) - included in cache refresh so Dashboard reuses cache
+_BENCHMARK_SYMBOLS_FOR_CACHE = ["^DJI", "SPY", "QQQ"]
+
+
 def _refresh_cache_background_impl():
     """
-    Build a new cache from yfinance, then hot-swap with the live cache.
-    Does not block or clear the live cache until the new one is ready.
+    Build a new cache from yfinance (investor stocks + benchmark indices), then hot-swap.
+    All users then read from this cache; no per-request yfinance calls when cache is warm.
     """
     global stock_cache
-    symbols = get_all_symbols()
+    investor_symbols = get_all_symbols()
+    # Include benchmark indices so /index-performance and Dashboard reuse cache
+    symbols = list(investor_symbols) + [s for s in _BENCHMARK_SYMBOLS_FOR_CACHE if s not in set(investor_symbols)]
     if not symbols:
         return
+    log.info("[Cache refresh] Starting fetch for %s symbols (investor stocks + indices ^DJI/SPY/QQQ); requests will use cache when done.", len(symbols))
     new_cache = {}
-    for i, symbol in enumerate(symbols):
+    for symbol in symbols:
         data = _fetch_one_stock_from_api(symbol)
         if data:
             new_cache[symbol] = data
     with _cache_refresh_lock:
         stock_cache = new_cache
-    print(f"[Cache refresh] Hot-swap complete: {len(new_cache)} symbols updated at {datetime.now().strftime('%H:%M:%S')}")
+    log.info("[Cache refresh] Hot-swap complete: %s symbols (investor + benchmarks) at %s", len(new_cache), datetime.now().strftime("%H:%M:%S"))
 
 
 def _background_refresh_loop():
-    """Run cache refresh every CACHE_REFRESH_INTERVAL_SEC. Does not block request handlers."""
-    time.sleep(60)  # Wait 1 min after startup before first refresh
+    """Run cache refresh every CACHE_REFRESH_INTERVAL_SEC. First run is initial warm-up."""
     while True:
         try:
             _refresh_cache_background_impl()
         except Exception as e:
-            print(f"[Cache refresh] Error: {e}")
-        time.sleep(CACHE_REFRESH_INTERVAL_SEC)
+            log.warning("Cache refresh error: %s", e)
+        time.sleep(CACHE_REFRESH_INTERVAL_SEC)  # wait 15 min until next refresh
 
 
 def fetch_stock_data(symbol: str) -> Optional[Dict]:
-    """Fetch stock data from yfinance with caching and retry logic."""
-    # Normalize symbol first
+    """Fetch stock data: use cache when present; only call yfinance on true cache miss.
+    Cache is updated by the background refresh every 15 min; we do not refetch during requests
+    so /investors/rankings and /stocks stay fast and use the cache prepared at startup."""
     symbol = normalize_symbol(symbol)
-    
-    # Check cache - use only if data is from today or yesterday
-    if symbol in stock_cache:
-        cached = stock_cache[symbol]
-        if not _is_cache_stale(cached):
-            return cached
-        # Stale: remove and refetch
-        del stock_cache[symbol]
-    
-    # Skip obviously invalid symbols
     if not symbol or len(symbol) < 1 or len(symbol) > 10:
         return None
-    
-    # Fetch from API (same logic as background refresh); store into live cache
+    # Use cache whenever the symbol is present; do not refetch during request (avoids slow yfinance)
+    if symbol in stock_cache:
+        return stock_cache[symbol]
+    # True cache miss (symbol not in cache): fetch and store (slow - only when cache not ready)
+    t0 = time.perf_counter()
     stock_data = _fetch_one_stock_from_api(symbol)
+    elapsed = time.perf_counter() - t0
+    log.info("[Rankings] fetch_stock_data MISS %s took %.2fs (symbol not in cache)", symbol, elapsed)
     if stock_data:
         with _cache_refresh_lock:
             stock_cache[symbol] = stock_data
@@ -430,13 +446,11 @@ def calculate_portfolio_metrics(investor: Dict) -> Dict:
 
 @app.on_event("startup")
 async def startup_event():
-    """Load data on startup and start background cache refresh."""
+    """Load data, start server immediately; warm cache in background so /health responds right away."""
     load_investors_from_csv()
-    print(f"Loaded {len(investors_data)} investors")
-    # Start background thread: refresh cache every 5 minutes; hot-swap when done (no impact on users)
     refresh_thread = threading.Thread(target=_background_refresh_loop, daemon=True)
     refresh_thread.start()
-    print("Background cache refresh started (every 5 minutes, hot-swap when complete)")
+    log.info("Startup complete; server ready. Cache warming in background (2-3 min); /health and data endpoints will return 503 until then.")
 
 @app.get("/")
 async def root():
@@ -445,19 +459,37 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Fast health check - no stock data fetching. Use this to verify backend is running."""
-    return {"status": "ok", "investors_loaded": len(investors_data)}
+    """Fast health check - no stock data fetching. cache_ready=True when dashboard data can be served from cache."""
+    cache_ready = len(stock_cache) > 0
+    log.info("GET /health cache_ready=%s cache_symbols=%s", cache_ready, len(stock_cache))
+    return {
+        "status": "ok",
+        "investors_loaded": len(investors_data),
+        "cache_ready": cache_ready,
+        "cache_symbols": len(stock_cache),
+    }
 
 @app.get("/investors")
 async def get_investors():
     """Get all investors with their stock picks."""
     return [{"alias": inv["alias"], "stocks": inv["stocks"]} for inv in investors_data]
 
+def _ensure_cache_ready():
+    """Raise 503 if cache is empty so frontend can retry instead of blocking for minutes."""
+    if len(stock_cache) == 0:
+        log.info("Stock data requested but cache empty (still warming); returning 503")
+        raise HTTPException(
+            status_code=503,
+            detail="Cache warming; retry in a few seconds. First load after restart takes 2–3 minutes.",
+        )
+
+
 @app.get("/investors/rankings")
 async def get_investor_rankings():
     """Get investor rankings with performance metrics."""
+    t0 = time.perf_counter()
+    _ensure_cache_ready()
     rankings = []
-    
     for investor in investors_data:
         metrics = calculate_portfolio_metrics(investor)
         rankings.append({
@@ -465,19 +497,20 @@ async def get_investor_rankings():
             "stocks": investor["stocks"],
             **metrics
         })
-    
+    loop_elapsed = time.perf_counter() - t0
+    log.info("[Rankings] loop %.2fs for %d investors", loop_elapsed, len(investors_data))
     # Sort by YTD return (descending)
     rankings.sort(key=lambda x: x["ytd"], reverse=True)
-    
-    # Add rank
     for idx, ranking in enumerate(rankings, 1):
         ranking["rank"] = idx
-    
+    total_elapsed = time.perf_counter() - t0
+    log.info("[Rankings] total %.2fs, %d rows (cache_symbols=%d)", total_elapsed, len(rankings), len(stock_cache))
     return rankings
 
 @app.get("/stocks")
 async def get_stocks():
     """Get all unique stocks across all investors with metrics."""
+    _ensure_cache_ready()
     # Collect all unique stocks
     all_stocks = set()
     stock_to_investors = defaultdict(list)
@@ -522,11 +555,13 @@ async def get_stocks():
                 "value_pct": round((total_value / (len(investors_data) * INITIAL_PORTFOLIO_VALUE)) * 100, 2) if investors_data else 0.0
             })
     
+    log.info("Served /stocks (%d symbols)", len(stocks_data))
     return stocks_data
 
 @app.get("/metrics")
 async def get_metrics():
-    """Get aggregated metrics."""
+    """Get aggregated metrics. Returns 503 while cache is warming so frontend can retry instead of blocking."""
+    _ensure_cache_ready()
     rankings = await get_investor_rankings()
     stocks = await get_stocks()
     
@@ -543,6 +578,7 @@ async def get_metrics():
         if rankings else 0.0
     )
     
+    log.info("Served /metrics")
     return {
         "top_investors": top_investors,
         "top_stocks": top_stocks,
@@ -558,3 +594,119 @@ async def refresh_data():
     global stock_cache
     stock_cache.clear()
     return {"message": "Cache cleared. Data will be refreshed on next request."}
+
+
+# --- MAI (Maheshwari AI) Index vs Benchmarks ---
+# Benchmarks: Dow Jones (^DJI), S&P 500 (SPY), Nasdaq 100 (QQQ)
+BENCHMARK_SYMBOLS = ["^DJI", "SPY", "QQQ"]
+
+def _get_price_on_date(stock_data: Optional[Dict], target_date: str) -> Optional[float]:
+    """Return price on target_date (YYYY-MM-DD) from stock_data, or first available if before target."""
+    if not stock_data or not stock_data.get("prices") or not stock_data.get("dates"):
+        return None
+    dates = stock_data["dates"]
+    prices = stock_data["prices"]
+    for i, d in enumerate(dates):
+        if d >= target_date:
+            return float(prices[i])
+    return float(prices[0]) if prices else None
+
+def _fetch_benchmark(symbol: str) -> Optional[Dict]:
+    """Use cache when present (indices refreshed every 15 min with stock cache); only call yfinance on true miss."""
+    if symbol in stock_cache:
+        return stock_cache[symbol]
+    log.info("[Index] yfinance call for benchmark %s (cache miss)", symbol)
+    data = _fetch_one_stock_from_api(symbol)
+    if data:
+        with _cache_refresh_lock:
+            stock_cache[symbol] = data
+        return data
+    return None
+
+@app.get("/index-performance")
+async def get_index_performance():
+    """
+    MAI (Maheshwari AI) index vs benchmarks for January 2026 performance.
+    MAI = sum of current (and start) prices of all unique stocks held by investors.
+    Benchmarks: Dow Jones (^DJI), S&P 500 (SPY), Nasdaq 100 (QQQ).
+    Returns: price on 1/1/2026, current price, gain/loss $, gain/loss %, MAI vs other (ratio of gain %).
+    """
+    _ensure_cache_ready()
+    start_date = "2026-01-01"
+    symbols = get_all_symbols()
+
+    # MAI: sum of prices across unique stocks (only stocks with valid start price)
+    mai_start = 0.0
+    mai_current = 0.0
+    for symbol in symbols:
+        data = fetch_stock_data(symbol)
+        if data and data.get("prices") and data.get("dates"):
+            start_p = _get_price_on_date(data, start_date)
+            if start_p is not None:
+                mai_start += start_p
+                mai_current += float(data["current_price"])
+
+    # Benchmarks
+    rows = []
+    mai_gain_pct = 0.0
+    if mai_start and mai_start > 0:
+        mai_gain = mai_current - mai_start
+        mai_gain_pct = (mai_gain / mai_start) * 100
+        rows.append({
+            "index": "MAI",
+            "index_label": "Maheshwari AI Index",
+            "price_start": round(mai_start, 2),
+            "price_current": round(mai_current, 2),
+            "gain_loss_dollars": round(mai_gain, 2),
+            "gain_loss_pct": round(mai_gain_pct, 2),
+            "mai_vs_other_pct": None,
+        })
+
+    for sym in BENCHMARK_SYMBOLS:
+        data = _fetch_benchmark(sym)
+        if not data or not data.get("prices") or not data.get("dates"):
+            continue
+        start_p = _get_price_on_date(data, start_date)
+        if start_p is None:
+            continue
+        current_p = float(data["current_price"])
+        gain = current_p - start_p
+        gain_pct = (gain / start_p) * 100
+        # MAI vs other: outperformance % = (MAI return / benchmark return - 1) * 100
+        mai_vs = ((mai_gain_pct / gain_pct) - 1) * 100 if gain_pct != 0 else None
+        label = {"^DJI": "DJAI", "SPY": "S&P 500", "QQQ": "NASDAQ"}.get(sym, sym)
+        rows.append({
+            "index": label,
+            "index_label": label,
+            "price_start": round(start_p, 2),
+            "price_current": round(current_p, 2),
+            "gain_loss_dollars": round(gain, 2),
+            "gain_loss_pct": round(gain_pct, 2),
+            "mai_vs_other_pct": round(mai_vs, 1) if mai_vs is not None else None,
+        })
+
+    log.info("Served /index-performance (%d rows)", len(rows))
+    return {
+        "rows": rows,
+        "as_of": datetime.now().isoformat(),
+    }
+
+
+# --- Conservative CSP (Cash-Secured Put) screener ---
+@app.get("/csp-ideas")
+async def get_csp_ideas(max_results: int = 50):
+    """
+    Conservative cash-secured put ideas: large-cap, 3–7 DTE, 8–15% OTM,
+    fundamental and option-quality filters. Ranked by annualized return,
+    downside protection, and probability of profit.
+    """
+    try:
+        from csp_screener import run_screener
+        opportunities = run_screener(max_results=max(min(max_results, 100), 10))
+        return {
+            "opportunities": opportunities,
+            "count": len(opportunities),
+            "as_of": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"CSP screener error: {str(e)}")

@@ -1,28 +1,10 @@
-import { useState, useEffect, useMemo } from 'react';
-import { getStocks } from '../services/api';
+import { useState, useMemo } from 'react';
 
-function StocksOverview() {
-  const [stocks, setStocks] = useState([]);
-  const [loading, setLoading] = useState(true);
+function StocksOverview({ stocks: stocksProp = null, dataRetrying = false }) {
   const [sortConfig, setSortConfig] = useState({ key: 'ytd', direction: 'desc' });
   const [searchTerm, setSearchTerm] = useState('');
   const [sectorFilter, setSectorFilter] = useState('');
-
-  useEffect(() => {
-    loadStocks();
-  }, []);
-
-  const loadStocks = async () => {
-    try {
-      setLoading(true);
-      const data = await getStocks();
-      setStocks(data);
-      setLoading(false);
-    } catch (error) {
-      console.error('Error loading stocks:', error);
-      setLoading(false);
-    }
-  };
+  const stocks = stocksProp ?? [];
 
   const handleSort = (key) => {
     let direction = 'asc';
@@ -77,10 +59,18 @@ function StocksOverview() {
     return sortConfig.direction === 'asc' ? '↑' : '↓';
   };
 
-  if (loading) {
+  if (stocksProp === null) {
     return (
-      <div className="flex items-center justify-center py-20">
+      <div className="flex flex-col items-center justify-center py-20 gap-4">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <p className="text-dark-muted">
+          {dataRetrying ? 'Backend is preparing data. Retrying in 15s…' : 'Loading stocks…'}
+        </p>
+        <p className="text-sm text-dark-muted max-w-md text-center">
+          {dataRetrying
+            ? 'Data is loaded once from cache; retrying until ready.'
+            : 'First load can take 2–3 minutes if the backend is warming its cache. Stocks will appear when ready.'}
+        </p>
       </div>
     );
   }
@@ -89,12 +79,6 @@ function StocksOverview() {
     <div className="space-y-4">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <h2 className="text-3xl font-bold">Stocks Overview</h2>
-        <button
-          onClick={loadStocks}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-        >
-          Refresh
-        </button>
       </div>
 
       {/* Filters */}

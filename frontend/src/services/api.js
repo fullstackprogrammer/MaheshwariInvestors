@@ -1,7 +1,16 @@
 import axios from 'axios';
 
-// Backend URL from .env (Vite exposes only vars prefixed with VITE_)
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+// Backend URL: .env wins; else when opened from non-localhost use same host:8000; else localhost:8000
+function getApiBaseUrl() {
+  if (import.meta.env.VITE_API_BASE_URL) return import.meta.env.VITE_API_BASE_URL;
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1')
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  return 'http://localhost:8000';
+}
+const API_BASE_URL = getApiBaseUrl();
+const DEBUG = true; // set to false to reduce console logs
+
+const debug = (msg, ...args) => { if (DEBUG) console.log(`[API] ${msg}`, ...args); };
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -11,18 +20,16 @@ const api = axios.create({
   timeout: 30000, // 30 second default timeout
 });
 
-// Health check uses short timeout (backend either responds in 5s or isn't there)
+// Health check: 15s timeout to allow for cold start / slow backend
 export const checkHealth = async () => {
-  const response = await axios.get(`${API_BASE_URL}/health`, { timeout: 5000 });
+  debug('checkHealth →', API_BASE_URL + '/health');
+  const response = await axios.get(`${API_BASE_URL}/health`, { timeout: 15000 });
+  debug('checkHealth OK', response.data);
   return response.data;
 };
 
-// Add request interceptor for logging
 api.interceptors.request.use(
-  (config) => {
-    console.log(`Making API request to: ${config.url}`);
-    return config;
-  },
+  (config) => config,
   (error) => {
     console.error('Request error:', error);
     return Promise.reject(error);
@@ -53,26 +60,57 @@ export const getInvestors = async () => {
   return response.data;
 };
 
+// Rankings/stocks trigger backend to fetch all symbols - can take 2–3+ min on first load
 export const getInvestorRankings = async () => {
-  const response = await api.get('/investors/rankings');
+  debug('getInvestorRankings →', API_BASE_URL + '/investors/rankings');
+  const response = await axios.get(`${API_BASE_URL}/investors/rankings`, {
+    timeout: 180000,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  debug('getInvestorRankings OK', Array.isArray(response.data) ? response.data.length + ' rows' : response.data);
   return response.data;
 };
 
 export const getStocks = async () => {
-  const response = await api.get('/stocks');
+  debug('getStocks →', API_BASE_URL + '/stocks');
+  const response = await axios.get(`${API_BASE_URL}/stocks`, {
+    timeout: 180000,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  debug('getStocks OK', Array.isArray(response.data) ? response.data.length + ' symbols' : response.data);
   return response.data;
 };
 
 export const getMetrics = async () => {
-  // Metrics fetches all stock data - can take 2+ minutes on first load
+  debug('getMetrics →', API_BASE_URL + '/metrics');
   const response = await axios.get(`${API_BASE_URL}/metrics`, {
     timeout: 180000, // 3 minutes for first load
     headers: { 'Content-Type': 'application/json' },
   });
+  debug('getMetrics OK', response.data?.total_investors != null ? response.data.total_investors + ' investors' : response.data);
   return response.data;
 };
 
 export const refreshData = async () => {
   const response = await api.post('/refresh-data');
+  return response.data;
+};
+
+/** Conservative cash-secured put ideas (screener can take 1–2 minutes). */
+export const getCspIdeas = async (maxResults = 50) => {
+  const response = await axios.get(`${API_BASE_URL}/csp-ideas`, {
+    params: { max_results: maxResults },
+    timeout: 120000,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return response.data;
+};
+
+/** MAI index vs benchmarks (can be slow on first load). */
+export const getIndexPerformance = async () => {
+  const response = await axios.get(`${API_BASE_URL}/index-performance`, {
+    timeout: 180000,
+    headers: { 'Content-Type': 'application/json' },
+  });
   return response.data;
 };

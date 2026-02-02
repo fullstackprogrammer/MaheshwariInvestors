@@ -1,26 +1,8 @@
-import { useState, useEffect, useMemo } from 'react';
-import { getInvestorRankings } from '../services/api';
+import { useState, useMemo } from 'react';
 
-function InvestorRankings() {
-  const [rankings, setRankings] = useState([]);
-  const [loading, setLoading] = useState(true);
+function InvestorRankings({ rankings: rankingsProp = null, dataRetrying = false }) {
   const [sortConfig, setSortConfig] = useState({ key: 'rank', direction: 'asc' });
-
-  useEffect(() => {
-    loadRankings();
-  }, []);
-
-  const loadRankings = async () => {
-    try {
-      setLoading(true);
-      const data = await getInvestorRankings();
-      setRankings(data);
-      setLoading(false);
-    } catch (error) {
-      console.error('Error loading investor rankings:', error);
-      setLoading(false);
-    }
-  };
+  const rankings = rankingsProp ?? [];
 
   const handleSort = (key) => {
     let direction = 'asc';
@@ -69,10 +51,18 @@ function InvestorRankings() {
     return sortConfig.direction === 'asc' ? '↑' : '↓';
   };
 
-  if (loading) {
+  if (rankingsProp === null) {
     return (
-      <div className="flex items-center justify-center py-20">
+      <div className="flex flex-col items-center justify-center py-20 gap-4">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <p className="text-dark-muted">
+          {dataRetrying ? 'Backend is preparing data. Retrying in 15s…' : 'Loading investor rankings…'}
+        </p>
+        <p className="text-sm text-dark-muted max-w-md text-center">
+          {dataRetrying
+            ? 'Data is loaded once from cache; retrying until ready.'
+            : 'First load can take 2–3 minutes if the backend is warming its cache. Rankings will appear when ready.'}
+        </p>
       </div>
     );
   }
@@ -81,12 +71,6 @@ function InvestorRankings() {
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h2 className="text-3xl font-bold">Investor Rankings</h2>
-        <button
-          onClick={loadRankings}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-        >
-          Refresh
-        </button>
       </div>
 
       <div className="overflow-x-auto">

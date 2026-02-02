@@ -1,32 +1,84 @@
 import { useState, useEffect } from 'react';
-import { getMetrics } from '../services/api';
+import { getMetrics, getIndexPerformance } from '../services/api';
 import KPICard from './KPICard';
+
+const RETRY_AFTER_MS = 15000; // 15s when backend returns 503 (cache warming)
+const INDEX_POLL_MS = 15 * 60 * 1000; // 15 min, matches backend refresh
 
 function Dashboard() {
   const [metrics, setMetrics] = useState(null);
+  const [indexPerformance, setIndexPerformance] = useState(null);
   const [viewMode, setViewMode] = useState('investors'); // 'investors' or 'stocks'
   const [loading, setLoading] = useState(true);
+  const [cacheWarming, setCacheWarming] = useState(false); // true when we got 503 and are retrying
 
   useEffect(() => {
-    loadMetrics();
-  }, []);
+    let cancelled = false;
+    let retryTimeoutId = null;
+    let indexRetryTimeoutId = null;
 
-  const loadMetrics = async () => {
-    try {
-      setLoading(true);
-      const data = await getMetrics();
-      setMetrics(data);
-      setLoading(false);
-    } catch (error) {
-      console.error('Error loading dashboard metrics:', error);
-      setLoading(false);
-    }
-  };
+    const loadMetrics = async () => {
+      try {
+        setLoading(true);
+        setCacheWarming(false);
+        const data = await getMetrics();
+        if (cancelled) return;
+        console.info('Dashboard: data loaded');
+        setMetrics(data);
+        setLoading(false);
+      } catch (error) {
+        if (cancelled) return;
+        const is503 = error.response?.status === 503;
+        if (is503) {
+          console.info('Dashboard: cache warming, retrying in 15s');
+          setCacheWarming(true);
+          setLoading(true);
+          retryTimeoutId = setTimeout(loadMetrics, RETRY_AFTER_MS);
+          return;
+        }
+        console.error('Error loading dashboard metrics:', error);
+        setLoading(false);
+      }
+    };
+
+    const loadIndex = () => {
+      getIndexPerformance()
+        .then((data) => {
+          if (!cancelled) setIndexPerformance(data);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          if (err.response?.status === 503) {
+            indexRetryTimeoutId = setTimeout(loadIndex, RETRY_AFTER_MS);
+            return;
+          }
+          console.error('Index performance load failed:', err);
+        });
+    };
+
+    loadMetrics();
+    loadIndex();
+    const interval = setInterval(loadIndex, INDEX_POLL_MS);
+    return () => {
+      cancelled = true;
+      if (retryTimeoutId) clearTimeout(retryTimeoutId);
+      if (indexRetryTimeoutId) clearTimeout(indexRetryTimeoutId);
+      clearInterval(interval);
+    };
+  }, []);
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-20">
+      <div className="flex flex-col items-center justify-center py-20 gap-4">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <p className="text-dark-muted">
+          {cacheWarming ? 'Backend is preparing data after restart. Retrying in 15s…' : 'Loading dashboard…'}
+        </p>
+        <p className="text-sm text-dark-muted">
+          {cacheWarming
+            ? 'Once the cache is warm, data will load from cache and future loads will be fast.'
+            : 'First load can take 2–3 minutes while the backend fetches stock data.'}
+        </p>
       </div>
     );
   }
@@ -124,6 +176,57 @@ function Dashboard() {
                   type="stock"
                 />
               ))}
+        </div>
+      </div>
+
+      {/* Index performance: MAI vs Benchmarks (refreshes every 15 min with backend) */}
+      <div>
+        <div className="overflow-x-auto rounded-lg border border-dark-border">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="bg-amber-600/80 text-white">
+                <th className="px-4 py-3 font-semibold">Index</th>
+                <th className="px-4 py-3 font-semibold">Price on 1/1/2026</th>
+                <th className="px-4 py-3 font-semibold">Current Price</th>
+                <th className="px-4 py-3 font-semibold">Gain/Loss $</th>
+                <th className="px-4 py-3 font-semibold">Gain/Loss %</th>
+                <th className="px-4 py-3 font-semibold">MAI compared to other indices</th>
+              </tr>
+            </thead>
+            <tbody>
+              {indexPerformance?.rows?.length ? (
+                indexPerformance.rows.map((row) => (
+                  <tr
+                    key={row.index}
+                    className={`border-b border-dark-border last:border-b-0 ${
+                      row.index === 'MAI'
+                        ? 'bg-amber-500/20 border-l-4 border-l-amber-500 font-medium'
+                        : 'bg-sky-500/10'
+                    }`}
+                  >
+                    <td className="px-4 py-3 font-medium">{row.index}</td>
+                    <td className="px-4 py-3">{row.price_start?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td className="px-4 py-3">{row.price_current?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td className={`px-4 py-3 ${(row.gain_loss_dollars ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {(row.gain_loss_dollars ?? 0) >= 0 ? '+' : ''}{row.gain_loss_dollars?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </td>
+                    <td className={`px-4 py-3 ${(row.gain_loss_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {(row.gain_loss_pct ?? 0) >= 0 ? '+' : ''}{row.gain_loss_pct?.toFixed(2)}%
+                    </td>
+                    <td className="px-4 py-3">
+                      {row.mai_vs_other_pct != null ? `${(row.mai_vs_other_pct >= 0 ? '+' : '')}${row.mai_vs_other_pct.toFixed(1)}%` : '—'}
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr className="bg-dark-surface">
+                  <td colSpan={6} className="px-4 py-6 text-center text-dark-muted">
+                    Loading index performance…
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

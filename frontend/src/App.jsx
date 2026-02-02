@@ -2,64 +2,142 @@ import { useState, useEffect } from 'react';
 import Dashboard from './components/Dashboard';
 import InvestorRankings from './components/InvestorRankings';
 import StocksOverview from './components/StocksOverview';
-import { checkHealth, getMetrics } from './services/api';
+import Login from './components/Login';
+import SiteLogo from './components/SiteLogo';
+import { checkHealth, getMetrics, getInvestorRankings, getStocks } from './services/api';
+
+// Same logic as api.js for error messages
+function getApiBaseUrl() {
+  if (import.meta.env.VITE_API_BASE_URL) return import.meta.env.VITE_API_BASE_URL;
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1')
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  return 'http://localhost:8000';
+}
+const API_BASE_URL = getApiBaseUrl();
+
+const DATA_RETRY_MS = 15000;
+const DEBUG = true;
 
 function App() {
+  const [authenticated, setAuthenticated] = useState(false);
   const [activeView, setActiveView] = useState('dashboard');
   const [lastUpdated, setLastUpdated] = useState(null);
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState(null);
+  // Rankings and stocks loaded once after login; tabs use this (no per-tab API calls)
+  const [rankingsData, setRankingsData] = useState(null);
+  const [stocksData, setStocksData] = useState(null);
+  const [dataRetrying, setDataRetrying] = useState(false);
+
+  const handleLogin = () => setAuthenticated(true);
 
   useEffect(() => {
+    if (!authenticated) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
+    let dataRetryTimeoutId = null;
+
+    async function loadRankingsAndStocks() {
+      try {
+        setDataRetrying(false);
+        if (DEBUG) console.log('[App] loadRankingsAndStocks: starting');
+        const [rankings, stocks] = await Promise.all([
+          getInvestorRankings(),
+          getStocks(),
+        ]);
+        if (cancelled) return;
+        if (DEBUG) console.log('[App] loadRankingsAndStocks: OK', rankings?.length, 'rankings', stocks?.length, 'stocks');
+        setRankingsData(rankings);
+        setStocksData(stocks);
+        setApiError(null);
+      } catch (err) {
+        if (cancelled) return;
+        if (err.response?.status === 503) {
+          if (DEBUG) console.log('[App] loadRankingsAndStocks: 503 cache warming, retry in 15s');
+          setDataRetrying(true);
+          dataRetryTimeoutId = setTimeout(loadRankingsAndStocks, DATA_RETRY_MS);
+          return;
+        }
+        console.error('[App] loadRankingsAndStocks failed:', err?.message || err, err.response?.status);
+        setRankingsData([]);
+        setStocksData([]);
+      }
+    }
 
     async function init() {
-      // 1. Quick health check (5 sec) - is backend running?
       try {
+        if (DEBUG) console.log('[App] init: checkHealth');
         await checkHealth();
         if (cancelled) return;
+        if (DEBUG) console.log('[App] init: health OK, loading rankings+stocks and metrics');
         setLoading(false);
         setApiError(null);
-        // 2. Load metrics in background (dashboard will show its own loading)
+        loadRankingsAndStocks();
         getMetrics()
           .then((metrics) => {
             if (!cancelled) {
+              if (DEBUG) console.log('[App] getMetrics OK', metrics?.last_updated);
               setLastUpdated(metrics.last_updated);
               setApiError(null);
             }
           })
           .catch((err) => {
             if (!cancelled) {
-              console.error('Metrics load failed:', err);
-              setApiError('Dashboard data is still loading. Try refreshing or check the backend. First load can take 2–3 minutes.');
+              console.error('[App] getMetrics failed:', err?.message || err, err.response?.status);
+              setApiError('Backend data is still loading or unavailable. If the backend just started, wait 2–3 minutes for the cache to warm. Rankings and stocks will appear when ready.');
             }
           });
       } catch (error) {
         if (!cancelled) {
           setLoading(false);
+          const url = API_BASE_URL;
+          if (DEBUG) console.log('[App] init failed:', error?.message || error, error?.code);
           if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-            setApiError('Backend did not respond in time. Is the server running on http://localhost:8000?');
+            setApiError(`Backend did not respond in time. Is the server running on ${url}?`);
           } else if (error.request) {
-            setApiError('Cannot connect to backend. Start the server: cd backend && venv\\Scripts\\activate && uvicorn main:app --reload --port 8000');
+            setApiError(`Cannot connect to backend at ${url}. Start the server (e.g. cd backend && uvicorn main:app --reload --port 8000).`);
           } else {
-            setApiError('Backend error. Ensure the server is running on http://localhost:8000');
+            setApiError(`Backend error. Ensure the server is running on ${url}`);
           }
         }
       }
     }
 
     init();
-    return () => { cancelled = true; };
-  }, []);
+    return () => {
+      cancelled = true;
+      if (dataRetryTimeoutId) clearTimeout(dataRetryTimeoutId);
+    };
+  }, [authenticated]);
+
+  if (!authenticated) {
+    return <Login onLogin={handleLogin} />;
+  }
+
+  // Wait for backend health check before showing main content
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-dark-bg flex flex-col items-center justify-center gap-4">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <p className="text-dark-muted">Connecting to backend at {API_BASE_URL}…</p>
+        <p className="text-sm text-dark-muted">If this hangs, check that the backend is running (uvicorn on port 8000).</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-dark-bg">
+    <div className="min-h-screen bg-dark-bg flex flex-col">
       {/* Header */}
       <header className="bg-dark-surface border-b border-dark-border">
         <div className="container mx-auto px-4 py-4">
           <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
-            <h1 className="text-2xl font-bold text-white">Maheshwari Investor Stock Analysis</h1>
-            <nav className="flex gap-2">
+            <div className="flex items-center gap-3">
+              <SiteLogo className="h-10 w-auto" />
+              <h1 className="text-2xl font-bold text-white">Maheshwari Investors</h1>
+            </div>
+            <nav className="flex gap-2 items-center">
               <button
                 onClick={() => setActiveView('dashboard')}
                 className={`px-4 py-2 rounded-lg transition-colors ${
@@ -90,6 +168,12 @@ function App() {
               >
                 Stocks Overview
               </button>
+              <button
+                onClick={() => setAuthenticated(false)}
+                className="px-4 py-2 rounded-lg bg-dark-surface text-dark-muted hover:bg-dark-border transition-colors"
+              >
+                Sign out
+              </button>
             </nav>
           </div>
           {lastUpdated && (
@@ -118,12 +202,25 @@ function App() {
         </div>
       )}
 
-      {/* Main Content */}
-      <main className="container mx-auto px-4 py-8">
+      {/* Main Content - rankings/stocks loaded once from cache; tabs display from props */}
+      <main className="container mx-auto px-4 py-8 flex-1">
         {activeView === 'dashboard' && <Dashboard />}
-        {activeView === 'investors' && <InvestorRankings />}
-        {activeView === 'stocks' && <StocksOverview />}
+        {activeView === 'investors' && (
+          <InvestorRankings rankings={rankingsData} dataRetrying={dataRetrying} />
+        )}
+        {activeView === 'stocks' && (
+          <StocksOverview stocks={stocksData} dataRetrying={dataRetrying} />
+        )}
       </main>
+
+      {/* Footer with footnotes */}
+      <footer className="bg-dark-surface border-t border-dark-border mt-auto">
+        <div className="container mx-auto px-4 py-4">
+          <p className="text-dark-muted text-sm">
+            <strong className="text-dark-muted">Notes:</strong> Each investor starts with $10,000 allocated equally across their selected stocks. Market data is refreshed every 15 minutes. Investor names are anonymized and displayed only as aliases.
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }
