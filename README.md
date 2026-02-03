@@ -49,6 +49,45 @@ MaheshwariInvestors/
 └── README.md
 ```
 
+## Quick commit to GitHub
+
+**Option 1 – Git aliases (set once, use in any repo)**
+
+Run once (PowerShell or Git Bash):
+
+```bash
+# Add + commit (message is the next argument)
+git config --global alias.ac "!git add -A && git commit -m \"$1\""
+
+# Add + commit + push
+git config --global alias.acp "!git add -A && git commit -m \"$1\" && git push"
+```
+
+Then from the repo root:
+
+```bash
+git ac "Fix API URL for maheshai.com"
+git acp "Update deploy docs"
+```
+
+On Windows CMD/PowerShell, if the alias fails, use the script (Option 2) instead.
+
+**Option 2 – Script (one command from repo root)**
+
+```powershell
+# PowerShell (Windows)
+.\scripts\quick-commit.ps1 "Your commit message"
+```
+
+```bash
+# Bash (WSL / Git Bash / macOS)
+./scripts/quick-commit.sh "Your commit message"
+```
+
+**Option 3 – Cursor / VS Code**
+
+- **Ctrl+Shift+G** → Source Control → stage all (click **+** next to Changes) → type message → **Ctrl+Enter** to commit → **Sync** or **Push**.
+
 ## Setup Instructions
 
 ### Prerequisites

@@ -1,0 +1,12 @@
+# Copy to config (or .env) and fill in. Redeploy scripts read these.
+# Windows: copy deploy\config.example deploy\config
+# Bash:    cp deploy/config.example deploy/config
+
+EC2_IP=54.89.185.96
+KEY_PATH=C:\path\to\your-key.pem
+
+# SSH user (Amazon Linux: ec2-user, Ubuntu: ubuntu)
+EC2_USER=ec2-user
+
+# App path on EC2
+REMOTE_APP_DIR=/home/ec2-user/MaheshwariInvestors

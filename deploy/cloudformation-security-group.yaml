@@ -1,0 +1,53 @@
+# CloudFormation: Security group for Maheshwari Investors (single EC2)
+# Use once per environment; attach the created SG to your EC2 instance.
+#
+# Deploy:
+#   aws cloudformation deploy --template-file deploy/cloudformation-security-group.yaml \
+#     --stack-name maheshwari-sg --parameter-overrides VpcId=vpc-xxxxx
+#
+# Get VpcId (default VPC): aws ec2 describe-vpcs --query "Vpcs[?IsDefault].VpcId" --output text
+# After deploy: EC2 Console → Instance → Security → Change security group → Add "maheshwari-sg-..."
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Security group for Maheshwari Investors EC2 (SSH, HTTP, HTTPS, API 8000)
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the EC2 instance lives (e.g. default VPC)
+
+Resources:
+  MaheshwariSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: maheshwari-investors-sg
+      GroupDescription: SSH, HTTP, HTTPS, API port 8000 for Maheshwari Investors
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          Description: SSH
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          Description: HTTP (Nginx)
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          Description: HTTPS
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          Description: API (frontend calls backend)
+
+Outputs:
+  SecurityGroupId:
+    Description: Security group ID to attach to your EC2 instance
+    Value: !Ref MaheshwariSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-SecurityGroupId"

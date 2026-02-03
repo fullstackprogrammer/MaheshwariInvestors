@@ -4,6 +4,136 @@ This guide covers two deployment options. **Option A (single EC2)** is the simpl
 
 ---
 
+## Automated deploy (configure once, redeploy easily)
+
+To avoid repeating manual steps when you set up a new instance or redeploy:
+
+| Goal | What to use |
+|------|-------------|
+| **Security group** (22, 80, 443, 8000) in one go | CloudFormation: `deploy/cloudformation-security-group.yaml` |
+| **Bootstrap a fresh EC2** (packages, Nginx, systemd) | Run once on the instance: `deploy/ec2-bootstrap.sh` |
+| **Redeploy frontend** (build + upload + restart) | `deploy/deploy.ps1` (PowerShell) or `deploy/deploy.sh` (Bash) |
+
+**One-time setup**
+
+1. **Security group:** Create the group and attach it to your instance:
+   ```bash
+   # Get your default VPC ID
+   aws ec2 describe-vpcs --query "Vpcs[?IsDefault].VpcId" --output text
+   # Deploy stack (replace vpc-xxxxx)
+   aws cloudformation deploy --template-file deploy/cloudformation-security-group.yaml \
+     --stack-name maheshwari-sg --parameter-overrides VpcId=vpc-xxxxx
+   ```
+   Then in EC2 Console → your instance → Security → Change security group → add the created group (e.g. `maheshwari-investors-sg`).
+
+2. **Bootstrap EC2 (new instance only):** Copy `deploy/ec2-bootstrap.sh` to the instance and run it once. Then clone the repo, set up backend venv + frontend build, and start the API + Nginx (see script output).
+
+**Redeploy (frontend or full app)**
+
+1. Copy `deploy/config.example` to `deploy/config` and set `EC2_IP` and `KEY_PATH` (and `EC2_USER` if not `ec2-user`).
+2. From the **repo root**:
+   - **PowerShell:** `.\deploy\deploy.ps1` (frontend only) or `.\deploy\deploy.ps1 -BackendToo` (frontend + backend + data).
+   - **Bash/WSL:** `./deploy/deploy.sh` or `./deploy/deploy.sh --backend-too`.
+
+The script builds the frontend with `VITE_API_BASE_URL=http://YOUR_EC2_IP:8000`, uploads `frontend/dist` to the server, and restarts the backend and Nginx.
+
+---
+
+## Deploy frontend when backend is already on EC2 (port 8000)
+
+If the backend is already running on an EC2 instance at port 8000, use one of these:
+
+### Option 1: Same EC2 – Nginx serves frontend on port 80
+
+1. **On your EC2 instance**, install Nginx and Node (if not already):
+   ```bash
+   # Amazon Linux 2023
+   sudo dnf install -y nginx nodejs npm
+   # Ubuntu
+   sudo apt update && sudo apt install -y nginx nodejs npm
+   ```
+
+2. **Get your app on the server** (clone or upload):
+   ```bash
+   cd /home/ec2-user
+   git clone https://github.com/YOUR_ORG/MaheshwariInvestors.git
+   cd MaheshwariInvestors
+   ```
+
+3. **Build the frontend** with the API URL set to this server (replace `YOUR_EC2_PUBLIC_IP` with your instance’s public IP or domain):
+   ```bash
+   cd /home/ec2-user/MaheshwariInvestors/frontend
+   npm ci
+   export VITE_API_BASE_URL=http://YOUR_EC2_PUBLIC_IP:8000
+   npm run build
+   ```
+   If users will use a domain (e.g. `https://stocks.example.com`), use that instead:  
+   `export VITE_API_BASE_URL=https://stocks.example.com:8000` or your API domain.
+
+4. **Configure Nginx** to serve the built app (e.g. create `/etc/nginx/conf.d/maheshwari.conf` on Amazon Linux, or a file in `/etc/nginx/sites-available/` on Ubuntu):
+   ```nginx
+   server {
+       listen 80;
+       server_name _;
+       root /home/ec2-user/MaheshwariInvestors/frontend/dist;
+       index index.html;
+       location / {
+           try_files $uri $uri/ /index.html;
+       }
+   }
+   ```
+
+5. **Reload Nginx:**
+   ```bash
+   sudo nginx -t && sudo systemctl reload nginx
+   ```
+
+6. **Security group:** Ensure the instance allows **HTTP (80)** from `0.0.0.0/0` (or your allowed IPs) so users can open the site. **Also allow Custom TCP port 8000** from `0.0.0.0/0` (or your IPs) so the browser can reach the API at `http://YOUR_EC2_PUBLIC_IP:8000`.
+
+7. **Open the app:** `http://YOUR_EC2_PUBLIC_IP` — the React app will call `http://YOUR_EC2_PUBLIC_IP:8000` for the API.
+
+**If you see "API Connection Error" or "Backend did not respond in time":**
+- **Port 8000:** In AWS Console → EC2 → Security Groups → your instance’s group, add **Inbound rule**: Type = Custom TCP, Port = 8000, Source = 0.0.0.0/0 (or your IP).
+- **Backend running:** On EC2 run `curl http://127.0.0.1:8000/health`; if it fails, start the backend (see §5) with `uvicorn main:app --host 0.0.0.0 --port 8000`.
+- **Listen on all interfaces:** Backend must use `--host 0.0.0.0` so it accepts connections from the browser (not just `127.0.0.1`).
+
+### Option 2: Build locally, upload only `dist/`
+
+1. **On your Windows machine** (in the project):
+   ```powershell
+   cd frontend
+   $env:VITE_API_BASE_URL="http://YOUR_EC2_PUBLIC_IP:8000"
+   npm run build
+   ```
+
+2. **Upload the built folder** to EC2 (from PowerShell, using your `.pem` and EC2 IP):
+   ```powershell
+   scp -i your-key.pem -r dist ec2-user@YOUR_EC2_PUBLIC_IP:/home/ec2-user/MaheshwariInvestors/frontend/
+   ```
+
+3. **On EC2:** Install and configure Nginx as in Option 1 (steps 1, 4, 5). Point `root` to `/home/ec2-user/MaheshwariInvestors/frontend/dist`.
+
+### Option 3: Frontend on S3 + CloudFront (backend stays on EC2)
+
+1. **Build** with the backend URL (your EC2 API or a domain pointing to it):
+   ```bash
+   cd frontend
+   export VITE_API_BASE_URL=http://YOUR_EC2_PUBLIC_IP:8000
+   npm run build
+   ```
+
+2. **Create an S3 bucket** (e.g. `mai-frontend-yourname`), enable static website hosting (optional if using CloudFront).
+
+3. **Upload** the contents of `frontend/dist/` to the bucket (all files in `dist/`, not the `dist` folder itself).
+
+4. **Create a CloudFront distribution:** Origin = your S3 bucket (or S3 website endpoint). Default root object = `index.html`. Add a custom error response: HTTP 403 and 404 → return `200` with `/index.html` (for SPA routing).
+
+5. **CORS:** Backend already allows `*`. If the frontend and API are on different origins, keep that or restrict to your CloudFront domain.
+
+6. **Open the app** via the CloudFront URL (e.g. `https://d1234abcd.cloudfront.net`). The app will call `http://YOUR_EC2_PUBLIC_IP:8000`; for production, put the API behind a domain or same CloudFront with path routing.
+
+---
+
 ## Prerequisites
 
 - AWS account
