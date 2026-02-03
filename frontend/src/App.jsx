@@ -135,7 +135,6 @@ function App() {
           <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
             <div className="flex items-center gap-3">
               <SiteLogo className="h-10 w-auto" />
-              <h1 className="text-2xl font-bold text-white">Maheshwari Investors</h1>
             </div>
             <nav className="flex gap-2 items-center">
               <button
