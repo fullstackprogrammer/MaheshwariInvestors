@@ -24,9 +24,6 @@ function Login({ onLogin }) {
       <div className="w-full max-w-sm bg-dark-surface border border-dark-border rounded-xl shadow-xl p-8">
         <div className="flex flex-col items-center mb-6">
           <SiteLogo className="h-12 w-auto mb-3" />
-          <h1 className="text-2xl font-bold text-white text-center">
-            Maheshwari Investors
-          </h1>
         </div>
         <p className="text-dark-muted text-sm text-center mb-6">
           Sign in to view the dashboard
