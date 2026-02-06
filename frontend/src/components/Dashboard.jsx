@@ -132,7 +132,7 @@ function Dashboard() {
         <div className="bg-dark-surface border border-dark-border rounded-lg p-6">
           <p className="text-dark-muted text-sm mb-1">Avg Portfolio Value</p>
           <p className="text-3xl font-bold">
-            ${((metrics.top_investors.reduce((sum, inv) => sum + inv.portfolio_value, 0) / metrics.top_investors.length) || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            ${(metrics.average_portfolio_value ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
           </p>
         </div>
         <div className="bg-dark-surface border border-dark-border rounded-lg p-6">

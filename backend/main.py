@@ -579,6 +579,11 @@ async def get_metrics():
         sum(r["ytd"] for r in rankings) / len(rankings)
         if rankings else 0.0
     )
+    # Average portfolio value across ALL investors (consistent with aggregate_ytd; each starts at INITIAL_PORTFOLIO_VALUE)
+    average_portfolio_value = (
+        sum(r["portfolio_value"] for r in rankings) / len(rankings)
+        if rankings else float(INITIAL_PORTFOLIO_VALUE)
+    )
     
     log.info("Served /metrics")
     return {
@@ -586,6 +591,7 @@ async def get_metrics():
         "top_stocks": top_stocks,
         "total_investors": len(investors_data),
         "total_stocks": len(stocks),
+        "average_portfolio_value": round(average_portfolio_value, 2),
         "aggregate_ytd_return": round(aggregate_ytd, 2),
         "last_updated": datetime.now().isoformat()
     }
