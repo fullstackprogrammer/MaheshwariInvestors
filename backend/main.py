@@ -7,7 +7,7 @@ import logging
 import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import List, Dict, Optional, Set
 import pandas as pd
 import yfinance as yf
@@ -593,7 +593,7 @@ async def get_metrics():
         "total_stocks": len(stocks),
         "average_portfolio_value": round(average_portfolio_value, 2),
         "aggregate_ytd_return": round(aggregate_ytd, 2),
-        "last_updated": datetime.now().isoformat()
+        "last_updated": datetime.now(timezone.utc).isoformat()
     }
 
 @app.post("/refresh-data")
@@ -702,7 +702,7 @@ async def get_index_performance():
     log.info("Served /index-performance (%d rows)", len(rows))
     return {
         "rows": rows,
-        "as_of": datetime.now().isoformat(),
+        "as_of": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -720,7 +720,7 @@ async def get_csp_ideas(max_results: int = 50):
         return {
             "opportunities": opportunities,
             "count": len(opportunities),
-            "as_of": datetime.now().isoformat(),
+            "as_of": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"CSP screener error: {str(e)}")

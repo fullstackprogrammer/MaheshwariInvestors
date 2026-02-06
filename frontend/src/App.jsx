@@ -178,7 +178,7 @@ function App() {
           </div>
           {lastUpdated && (
             <p className="text-sm text-dark-muted mt-2">
-              Last updated: {new Date(lastUpdated).toLocaleString('en-US', { timeZone: 'America/Chicago' })} CST
+              Last updated: {new Date(lastUpdated).toLocaleString('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })} CST
             </p>
           )}
         </div>
