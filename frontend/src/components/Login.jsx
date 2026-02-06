@@ -21,11 +21,11 @@ function Login({ onLogin }) {
 
   return (
     <div className="min-h-screen bg-dark-bg flex items-center justify-center px-4">
-      <div className="w-full max-w-sm bg-dark-surface border border-dark-border rounded-xl shadow-xl p-8">
-        <div className="flex flex-col items-center mb-6">
-          <SiteLogo className="h-12 w-auto mb-3" />
+      <div className="w-full max-w-sm bg-dark-surface border border-dark-border rounded-xl shadow-xl pt-1 px-8 pb-8">
+        <div className="flex flex-col items-center mb-5">
+          <SiteLogo className="h-72 w-auto" />
         </div>
-        <p className="text-dark-muted text-sm text-center mb-6">
+        <p className="text-dark-muted text-sm text-center mb-4">
           Sign in to view the dashboard
         </p>
         <form onSubmit={handleSubmit} className="space-y-4">

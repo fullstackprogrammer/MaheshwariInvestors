@@ -184,7 +184,7 @@ function Dashboard() {
         <div className="overflow-x-auto rounded-lg border border-dark-border">
           <table className="w-full text-left">
             <thead>
-              <tr className="bg-amber-600/80 text-white">
+              <tr className="bg-sky-700 text-white">
                 <th className="px-4 py-3 font-semibold">Index</th>
                 <th className="px-4 py-3 font-semibold">Price on 1/1/2026</th>
                 <th className="px-4 py-3 font-semibold">Current Price</th>
@@ -200,7 +200,7 @@ function Dashboard() {
                     key={row.index}
                     className={`border-b border-dark-border last:border-b-0 ${
                       row.index === 'MAI'
-                        ? 'bg-amber-500/20 border-l-4 border-l-amber-500 font-medium'
+                        ? 'bg-sky-600/25 border-l-4 border-l-sky-400 font-medium'
                         : 'bg-sky-500/10'
                     }`}
                   >
@@ -213,7 +213,7 @@ function Dashboard() {
                     <td className={`px-4 py-3 ${(row.gain_loss_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                       {(row.gain_loss_pct ?? 0) >= 0 ? '+' : ''}{row.gain_loss_pct?.toFixed(2)}%
                     </td>
-                    <td className="px-4 py-3">
+                    <td className={`px-4 py-3 ${row.mai_vs_other_pct != null ? (row.mai_vs_other_pct >= 0 ? 'text-green-400' : 'text-red-400') : ''}`}>
                       {row.mai_vs_other_pct != null ? `${(row.mai_vs_other_pct >= 0 ? '+' : '')}${row.mai_vs_other_pct.toFixed(1)}%` : '—'}
                     </td>
                   </tr>

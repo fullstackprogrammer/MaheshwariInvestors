@@ -216,7 +216,7 @@ def _fetch_one_stock_from_api(symbol: str) -> Optional[Dict]:
     symbol = normalize_symbol(symbol)
     if not symbol or len(symbol) < 1 or len(symbol) > 10:
         return None
-    if symbol in ("^DJI", "SPY", "QQQ"):
+    if symbol in ("^DJI", "^SPX", "^IXIC"):
         log.info("[Index] yfinance call for index %s", symbol)
     for attempt in range(3):
         try:
@@ -252,6 +252,7 @@ def _fetch_one_stock_from_api(symbol: str) -> Optional[Dict]:
                 "sector": info.get("sector", "Unknown"),
                 "industry": info.get("industry", "Unknown"),
                 "current_price": current_price,
+                "market_cap": info.get("marketCap"),
                 "pe_ratio": info.get("trailingPE"),
                 "forward_pe": info.get("forwardPE"),
                 "prices": prices,
@@ -275,8 +276,8 @@ def get_all_symbols() -> List[str]:
     return sorted(symbols)
 
 
-# Benchmark indices (DJIA, S&P 500, Nasdaq) - included in cache refresh so Dashboard reuses cache
-_BENCHMARK_SYMBOLS_FOR_CACHE = ["^DJI", "SPY", "QQQ"]
+# Benchmark indices (DJIA, S&P 500, Nasdaq Composite) - included in cache refresh so Dashboard reuses cache
+_BENCHMARK_SYMBOLS_FOR_CACHE = ["^DJI", "^SPX", "^IXIC"]
 
 
 def _refresh_cache_background_impl():
@@ -290,7 +291,7 @@ def _refresh_cache_background_impl():
     symbols = list(investor_symbols) + [s for s in _BENCHMARK_SYMBOLS_FOR_CACHE if s not in set(investor_symbols)]
     if not symbols:
         return
-    log.info("[Cache refresh] Starting fetch for %s symbols (investor stocks + indices ^DJI/SPY/QQQ); requests will use cache when done.", len(symbols))
+    log.info("[Cache refresh] Starting fetch for %s symbols (investor stocks + indices ^DJI/^SPX/^IXIC); requests will use cache when done.", len(symbols))
     new_cache = {}
     for symbol in symbols:
         data = _fetch_one_stock_from_api(symbol)
@@ -544,6 +545,7 @@ async def get_stocks():
                 "sector": stock_data["sector"],
                 "industry": stock_data["industry"],
                 "current_price": round(stock_data["current_price"], 2),
+                "market_cap": stock_data.get("market_cap"),
                 "daily": returns["daily"],
                 "1m": returns["1m"],
                 "3m": returns["3m"],
@@ -597,8 +599,8 @@ async def refresh_data():
 
 
 # --- MAI (Maheshwari AI) Index vs Benchmarks ---
-# Benchmarks: Dow Jones (^DJI), S&P 500 (SPY), Nasdaq 100 (QQQ)
-BENCHMARK_SYMBOLS = ["^DJI", "SPY", "QQQ"]
+# Benchmarks: Dow Jones (^DJI), S&P 500 (^SPX), NASDAQ Composite (^IXIC)
+BENCHMARK_SYMBOLS = ["^DJI", "^SPX", "^IXIC"]
 
 def _get_price_on_date(stock_data: Optional[Dict], target_date: str) -> Optional[float]:
     """Return price on target_date (YYYY-MM-DD) from stock_data, or first available if before target."""
@@ -628,8 +630,8 @@ async def get_index_performance():
     """
     MAI (Maheshwari AI) index vs benchmarks for January 2026 performance.
     MAI = sum of current (and start) prices of all unique stocks held by investors.
-    Benchmarks: Dow Jones (^DJI), S&P 500 (SPY), Nasdaq 100 (QQQ).
-    Returns: price on 1/1/2026, current price, gain/loss $, gain/loss %, MAI vs other (ratio of gain %).
+    Benchmarks: Dow Jones (^DJI), S&P 500 (^SPX), NASDAQ Composite (^IXIC).
+    Returns: price on 1/1/2026, current price, gain/loss $, gain/loss %, MAI vs other (% diff, sign = MAI better + / worse -).
     """
     _ensure_cache_ready()
     start_date = "2026-01-01"
@@ -672,9 +674,15 @@ async def get_index_performance():
         current_p = float(data["current_price"])
         gain = current_p - start_p
         gain_pct = (gain / start_p) * 100
-        # MAI vs other: outperformance % = (MAI return / benchmark return - 1) * 100
-        mai_vs = ((mai_gain_pct / gain_pct) - 1) * 100 if gain_pct != 0 else None
-        label = {"^DJI": "DJAI", "SPY": "S&P 500", "QQQ": "NASDAQ"}.get(sym, sym)
+        # MAI vs other: % difference with correct sign.
+        # Magnitude = relative % ((MAI/benchmark) - 1) * 100; sign = outperformance (MAI better -> +).
+        if gain_pct == 0:
+            mai_vs = None
+        else:
+            raw_pct = ((mai_gain_pct / gain_pct) - 1) * 100
+            sign = 1 if (mai_gain_pct - gain_pct) >= 0 else -1
+            mai_vs = sign * abs(raw_pct)
+        label = {"^DJI": "DJIA", "^SPX": "S&P 500", "^IXIC": "NASDAQ"}.get(sym, sym)
         rows.append({
             "index": label,
             "index_label": label,

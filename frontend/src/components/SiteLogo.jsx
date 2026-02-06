@@ -1,12 +1,16 @@
+import logoSrc from '../../logo.png';
+
 /**
- * Title text for MAI - Maheshwari Ansh Index (no logo).
+ * MAI - Maheshwari Ansh Index logo (used on login and in header).
  */
 function SiteLogo({ className = '' }) {
   return (
     <div className={`flex items-center ${className}`}>
-      <span className="font-bold text-white text-lg tracking-tight">
-        MAI - Maheshwari Ansh Index
-      </span>
+      <img
+        src={logoSrc}
+        alt="MAI - Maheshwari Ansh Index"
+        className="block h-full w-auto object-contain"
+      />
     </div>
   );
 }

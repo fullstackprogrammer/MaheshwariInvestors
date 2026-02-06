@@ -3,7 +3,6 @@ import Dashboard from './components/Dashboard';
 import InvestorRankings from './components/InvestorRankings';
 import StocksOverview from './components/StocksOverview';
 import Login from './components/Login';
-import SiteLogo from './components/SiteLogo';
 import { checkHealth, getMetrics, getInvestorRankings, getStocks } from './services/api';
 
 // Same logic as api.js for error messages
@@ -134,7 +133,9 @@ function App() {
         <div className="container mx-auto px-4 py-4">
           <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
             <div className="flex items-center gap-3">
-              <SiteLogo className="h-10 w-auto" />
+              <span className="font-bold text-white text-lg tracking-tight">
+                MAI - Maheshwari Ansh Index
+              </span>
             </div>
             <nav className="flex gap-2 items-center">
               <button
@@ -177,7 +178,7 @@ function App() {
           </div>
           {lastUpdated && (
             <p className="text-sm text-dark-muted mt-2">
-              Last updated: {new Date(lastUpdated).toLocaleString()}
+              Last updated: {new Date(lastUpdated).toLocaleString('en-US', { timeZone: 'America/Chicago' })} CST
             </p>
           )}
         </div>

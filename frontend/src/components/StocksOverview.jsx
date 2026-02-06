@@ -54,6 +54,15 @@ function StocksOverview({ stocks: stocksProp = null, dataRetrying = false }) {
     return `${sign}${num.toFixed(2)}%`;
   };
 
+  const formatMarketCap = (num) => {
+    if (num === null || num === undefined) return '-';
+    if (num >= 1e12) return `$${(num / 1e12).toFixed(2)}T`;
+    if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
+    if (num >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;
+    if (num >= 1e3) return `$${(num / 1e3).toFixed(2)}K`;
+    return `$${num.toLocaleString()}`;
+  };
+
   const getSortIcon = (key) => {
     if (sortConfig.key !== key) return '↕️';
     return sortConfig.direction === 'asc' ? '↑' : '↓';
@@ -134,6 +143,12 @@ function StocksOverview({ stocks: stocksProp = null, dataRetrying = false }) {
               </th>
               <th
                 className="px-4 py-3 text-right cursor-pointer hover:bg-dark-border transition-colors"
+                onClick={() => handleSort('market_cap')}
+              >
+                Market Cap {getSortIcon('market_cap')}
+              </th>
+              <th
+                className="px-4 py-3 text-right cursor-pointer hover:bg-dark-border transition-colors"
                 onClick={() => handleSort('daily')}
               >
                 Daily % {getSortIcon('daily')}
@@ -188,6 +203,9 @@ function StocksOverview({ stocks: stocksProp = null, dataRetrying = false }) {
                 <td className="px-4 py-3 text-dark-muted text-sm">{stock.industry}</td>
                 <td className="px-4 py-3 text-right font-semibold">
                   ${formatNumber(stock.current_price)}
+                </td>
+                <td className="px-4 py-3 text-right text-dark-muted">
+                  {formatMarketCap(stock.market_cap)}
                 </td>
                 <td
                   className={`px-4 py-3 text-right ${
