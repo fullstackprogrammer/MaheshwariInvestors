@@ -308,9 +308,14 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ### 5. Run backend permanently (systemd)
 
-Create `/etc/systemd/system/maheshwari-api.service`:
+If you start the backend manually in an SSH session (`uvicorn main:app ...`), it will stop when you close the SSH window. Use a **systemd service** so the backend keeps running after you disconnect and restarts on reboot.
 
-```ini
+#### Create the service file
+
+**Option A – One command (copy-paste on EC2):**
+
+```bash
+sudo tee /etc/systemd/system/maheshwari-api.service << 'EOF'
 [Unit]
 Description=Maheshwari Investors FastAPI
 After=network.target
@@ -326,9 +331,20 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
 
-Then:
+**Option B – Create with an editor:**
+
+```bash
+sudo nano /etc/systemd/system/maheshwari-api.service
+```
+
+Paste the same `[Unit]` / `[Service]` / `[Install]` contents as above, then save (Ctrl+O, Enter) and exit (Ctrl+X).
+
+If your repo lives somewhere other than `/home/ec2-user/MaheshwariInvestors/backend`, edit `WorkingDirectory`, `Environment`, and `ExecStart` to use that path.
+
+#### Enable and start the service
 
 ```bash
 sudo systemctl daemon-reload
@@ -336,6 +352,15 @@ sudo systemctl enable maheshwari-api
 sudo systemctl start maheshwari-api
 sudo systemctl status maheshwari-api
 ```
+
+**Useful commands:**
+
+| Action   | Command |
+|----------|--------|
+| Start    | `sudo systemctl start maheshwari-api` |
+| Stop     | `sudo systemctl stop maheshwari-api` |
+| Restart  | `sudo systemctl restart maheshwari-api` |
+| Logs     | `journalctl -u maheshwari-api -f` |
 
 **Backend resilience (overnight / Yahoo throttling):** The app is built to avoid crashes from yfinance timeouts or throttling:
 
@@ -350,6 +375,48 @@ sudo systemctl status maheshwari-api
 - **API:** `http://YOUR_PUBLIC_IP:8000` (used by the frontend if you set `VITE_API_BASE_URL` to that)
 
 Log in with `maheshai` / `admin$123`.
+
+### 6a. Troubleshooting: "Frontend not connecting to backend" (backend is running)
+
+If `sudo systemctl status maheshwari-api` shows **active (running)** but the site still shows "API Connection Error", the frontend is calling `https://maheshai.com/api` and that request must go through **Nginx** to the backend. If Nginx is not running, the API calls never reach the backend.
+
+**1. Check and start Nginx (on EC2):**
+
+```bash
+sudo systemctl status nginx
+```
+
+If it says **inactive** or **failed**:
+
+```bash
+sudo systemctl enable nginx
+sudo systemctl start nginx
+sudo systemctl status nginx
+```
+
+**2. Ensure Nginx starts on boot** (so it survives reboot and terminal close):
+
+```bash
+sudo systemctl enable nginx
+```
+
+**3. Verify the API is reachable through Nginx (on EC2):**
+
+```bash
+# Backend directly (should work if maheshwari-api is running)
+curl -s http://127.0.0.1:8000/health
+
+# Through Nginx (must work for the site to work)
+curl -s http://127.0.0.1/api/health
+```
+
+If the first succeeds but the second fails, Nginx is not proxying `/api/` correctly. Check that you have a `location /api/ { proxy_pass http://127.0.0.1:8000/; ... }` block in your Nginx config (e.g. `/etc/nginx/conf.d/maheshai.conf` or `sites-enabled`). See §4 above for the config snippet.
+
+**4. Reload Nginx after any config change:**
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
 
 ### 7. (Optional) HTTPS and domain
 
@@ -394,6 +461,15 @@ Log in with `maheshai` / `admin$123`.
 |-------------|----------------------|-----------------------------------------------------|
 | Build time  | `VITE_API_BASE_URL`  | `http://YOUR_EC2_IP:8000` or `https://api.domain.com` |
 | Backend     | CSV path             | Default: project root `DFWInvestors2026StockPicks.csv` or `data/investors.csv` |
+
+---
+
+## SMS alert when backend stops responding
+
+To get a text to your phone when the API goes down (e.g. after closing SSH or an overnight crash), see **[docs/SMS_ALERT_BACKEND_DOWN.md](docs/SMS_ALERT_BACKEND_DOWN.md)**. It covers:
+
+- **Option 1:** AWS SNS + Lambda (scheduled health check every 5 min; sends SMS on failure).
+- **Option 2:** Free external uptime monitors (e.g. UptimeRobot) with email/SMS.
 
 ---
 
