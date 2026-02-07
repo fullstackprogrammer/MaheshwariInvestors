@@ -16,6 +16,7 @@ import os
 import time
 import threading
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 # Logging: INFO only; cache refresh and errors
 logging.basicConfig(
@@ -115,6 +116,10 @@ alias_mapping = {}
 # Auto-refresh: interval in seconds (15 minutes)
 CACHE_REFRESH_INTERVAL_SEC = 900
 _cache_refresh_lock = threading.Lock()
+# Per-symbol fetch timeout (seconds); prevents yfinance throttle/hang from blocking refresh
+YFINANCE_FETCH_TIMEOUT_SEC = 30
+# Minimum symbols in new cache before we merge; below this we skip update to keep previous cache
+MIN_CACHE_SYMBOLS_TO_UPDATE = 1
 
 def load_investors_from_csv():
     """Load investors from CSV file and generate aliases."""
@@ -212,12 +217,11 @@ def _fetch_one_stock_from_api(symbol: str) -> Optional[Dict]:
     """
     Fetch one symbol from yfinance and return stock_data dict (or None).
     Does NOT read or write the global cache. Used for background refresh.
+    Exceptions are logged and converted to None so refresh loop never crashes.
     """
     symbol = normalize_symbol(symbol)
     if not symbol or len(symbol) < 1 or len(symbol) > 10:
         return None
-    if symbol in ("^DJI", "^SPX", "^IXIC"):
-        log.info("[Index] yfinance call for index %s", symbol)
     for attempt in range(3):
         try:
             ticker = yf.Ticker(symbol)
@@ -231,18 +235,20 @@ def _fetch_one_stock_from_api(symbol: str) -> Optional[Dict]:
                         hist = ticker.history(period="1mo")
                     if not hist.empty:
                         break
-                except Exception:
+                except Exception as e:
+                    log.debug("[yfinance] %s history attempt %s-%s: %s", symbol, start, end, e)
                     continue
             if hist is None or hist.empty:
                 if attempt < 2:
                     time.sleep(1)
                     continue
+                log.warning("[yfinance] %s: no history after 3 attempts", symbol)
                 return None
             info = {}
             try:
                 info = ticker.info or {}
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("[yfinance] %s info: %s", symbol, e)
             prices = hist["Adj Close"].tolist() if "Adj Close" in hist.columns else hist["Close"].tolist()
             current_price = float(prices[-1])
             dates = hist.index.tolist()
@@ -259,7 +265,8 @@ def _fetch_one_stock_from_api(symbol: str) -> Optional[Dict]:
                 "dates": [d.strftime("%Y-%m-%d") for d in dates],
                 "hist_data": hist,
             }
-        except Exception:
+        except Exception as e:
+            log.warning("[yfinance] %s attempt %d/3: %s", symbol, attempt + 1, e, exc_info=False)
             if attempt < 2:
                 time.sleep(2)
                 continue
@@ -280,51 +287,76 @@ def get_all_symbols() -> List[str]:
 _BENCHMARK_SYMBOLS_FOR_CACHE = ["^DJI", "^SPX", "^IXIC"]
 
 
+def _fetch_one_stock_with_timeout(symbol: str, timeout_sec: int = YFINANCE_FETCH_TIMEOUT_SEC) -> Optional[Dict]:
+    """Run _fetch_one_stock_from_api in a thread with timeout so yfinance throttle/hang does not block refresh."""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_fetch_one_stock_from_api, symbol)
+        try:
+            return future.result(timeout=timeout_sec)
+        except FuturesTimeoutError:
+            log.warning("[Cache refresh] %s timed out after %ds (yfinance may be throttling)", symbol, timeout_sec)
+            return None
+        except Exception as e:
+            log.warning("[Cache refresh] %s failed: %s", symbol, e)
+            return None
+
+
 def _refresh_cache_background_impl():
     """
-    Build a new cache from yfinance (investor stocks + benchmark indices), then hot-swap.
-    All users then read from this cache; no per-request yfinance calls when cache is warm.
+    Fetch symbols from yfinance (with per-symbol timeout), then MERGE into cache.
+    We never replace the cache with empty or worse data: only add/update entries we successfully fetched.
+    This way throttle/errors leave previous cache intact and the app keeps serving.
     """
     global stock_cache
     investor_symbols = get_all_symbols()
-    # Include benchmark indices so /index-performance and Dashboard reuse cache
     symbols = list(investor_symbols) + [s for s in _BENCHMARK_SYMBOLS_FOR_CACHE if s not in set(investor_symbols)]
     if not symbols:
+        log.info("[Cache refresh] No symbols to fetch; skipping.")
         return
-    log.info("[Cache refresh] Starting fetch for %s symbols (investor stocks + indices ^DJI/^SPX/^IXIC); requests will use cache when done.", len(symbols))
-    new_cache = {}
+    log.info("[Cache refresh] Starting fetch for %s symbols (timeout %ds each); will merge into existing cache.", len(symbols), YFINANCE_FETCH_TIMEOUT_SEC)
+    t0 = time.perf_counter()
+    fetched = 0
+    failed = 0
     for symbol in symbols:
-        data = _fetch_one_stock_from_api(symbol)
+        data = _fetch_one_stock_with_timeout(symbol)
         if data:
-            new_cache[symbol] = data
+            fetched += 1
+            with _cache_refresh_lock:
+                stock_cache[symbol] = data
+        else:
+            failed += 1
+    elapsed = time.perf_counter() - t0
     with _cache_refresh_lock:
-        stock_cache = new_cache
-    log.info("[Cache refresh] Hot-swap complete: %s symbols (investor + benchmarks) at %s", len(new_cache), datetime.now().strftime("%H:%M:%S"))
+        cache_size = len(stock_cache)
+    log.info("[Cache refresh] Done in %.1fs: fetched %s, failed %s, cache size now %s", elapsed, fetched, failed, cache_size)
+    if fetched == 0 and cache_size == 0:
+        log.warning("[Cache refresh] No data fetched and cache empty; app may return 503 until next refresh.")
 
 
 def _background_refresh_loop():
-    """Run cache refresh every CACHE_REFRESH_INTERVAL_SEC. First run is initial warm-up."""
+    """Run cache refresh every CACHE_REFRESH_INTERVAL_SEC. Never exits; exceptions are logged and loop continues."""
+    log.info("[Cache refresh] Background loop started; interval=%ds", CACHE_REFRESH_INTERVAL_SEC)
     while True:
         try:
             _refresh_cache_background_impl()
         except Exception as e:
-            log.warning("Cache refresh error: %s", e)
-        time.sleep(CACHE_REFRESH_INTERVAL_SEC)  # wait 15 min until next refresh
+            log.exception("[Cache refresh] Error (cache unchanged): %s", e)
+        try:
+            time.sleep(CACHE_REFRESH_INTERVAL_SEC)
+        except Exception as e:
+            log.warning("[Cache refresh] sleep interrupted: %s", e)
 
 
 def fetch_stock_data(symbol: str) -> Optional[Dict]:
-    """Fetch stock data: use cache when present; only call yfinance on true cache miss.
-    Cache is updated by the background refresh every 15 min; we do not refetch during requests
-    so /investors/rankings and /stocks stay fast and use the cache prepared at startup."""
+    """Fetch stock data: use cache when present; only call yfinance on true cache miss (with timeout)."""
     symbol = normalize_symbol(symbol)
     if not symbol or len(symbol) < 1 or len(symbol) > 10:
         return None
-    # Use cache whenever the symbol is present; do not refetch during request (avoids slow yfinance)
     if symbol in stock_cache:
         return stock_cache[symbol]
-    # True cache miss (symbol not in cache): fetch and store (slow - only when cache not ready)
+    # Cache miss: fetch with timeout so we don't hang the request
     t0 = time.perf_counter()
-    stock_data = _fetch_one_stock_from_api(symbol)
+    stock_data = _fetch_one_stock_with_timeout(symbol)
     elapsed = time.perf_counter() - t0
     log.info("[Rankings] fetch_stock_data MISS %s took %.2fs (symbol not in cache)", symbol, elapsed)
     if stock_data:
@@ -620,11 +652,11 @@ def _get_price_on_date(stock_data: Optional[Dict], target_date: str) -> Optional
     return float(prices[0]) if prices else None
 
 def _fetch_benchmark(symbol: str) -> Optional[Dict]:
-    """Use cache when present (indices refreshed every 15 min with stock cache); only call yfinance on true miss."""
+    """Use cache when present; on miss fetch with timeout so request doesn't hang."""
     if symbol in stock_cache:
         return stock_cache[symbol]
-    log.info("[Index] yfinance call for benchmark %s (cache miss)", symbol)
-    data = _fetch_one_stock_from_api(symbol)
+    log.info("[Index] benchmark %s cache miss; fetching with timeout", symbol)
+    data = _fetch_one_stock_with_timeout(symbol)
     if data:
         with _cache_refresh_lock:
             stock_cache[symbol] = data

@@ -337,6 +337,13 @@ sudo systemctl start maheshwari-api
 sudo systemctl status maheshwari-api
 ```
 
+**Backend resilience (overnight / Yahoo throttling):** The app is built to avoid crashes from yfinance timeouts or throttling:
+
+- Each Yahoo fetch runs with a **30s timeout**; the refresh loop never blocks indefinitely.
+- The cache is **merged** on refresh (successful fetches only); failed or timed-out symbols keep their previous cached data, so the app keeps serving.
+- Exceptions in the background refresh are logged and the loop continues; uvicorn is not taken down.
+- To monitor: `journalctl -u maheshwari-api -f` and look for `[Cache refresh]` (success/fail counts, timeouts) and `[yfinance]` (per-symbol errors).
+
 ### 6. Open the app
 
 - **Frontend:** `http://YOUR_PUBLIC_IP` (Nginx on 80)
