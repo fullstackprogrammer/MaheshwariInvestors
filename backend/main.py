@@ -828,3 +828,64 @@ async def get_csp_ideas(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"CSP screener error: {str(e)}")
+
+
+@app.get("/covered-calls-filters")
+async def get_covered_calls_filters():
+    """Return default covered calls screener filter values for the UI."""
+    try:
+        from covered_calls_screener import DEFAULT_FILTERS
+        return DEFAULT_FILTERS
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/covered-calls-ideas")
+async def get_covered_calls_ideas(
+    max_results: int = 50,
+    symbols: Optional[str] = None,
+    use_community_universe: Optional[bool] = None,
+    max_dte: Optional[int] = None,
+    sector: Optional[str] = None,
+    strike_pct_min: Optional[float] = None,
+    strike_pct_max: Optional[float] = None,
+    max_bid_ask_pct: Optional[float] = None,
+    min_annualized_return_pct: Optional[float] = None,
+    min_market_cap_b: Optional[float] = None,
+    max_symbols: Optional[int] = None,
+):
+    """
+    Covered call ideas. Pass optional query params to adjust screener filters.
+    symbols: comma-separated tickers; if provided, only those are scanned.
+    use_community_universe: if True and no symbols provided, use MAI community stocks.
+    """
+    try:
+        from covered_calls_screener import run_screener
+        symbol_list = None
+        if symbols and symbols.strip():
+            symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        elif use_community_universe in (True, "true", "1", 1):
+            symbol_list = get_all_symbols()
+        overrides = {}
+        if max_dte is not None: overrides["max_dte"] = max_dte
+        if sector and sector.strip(): overrides["sector"] = sector.strip()
+        if strike_pct_min is not None: overrides["strike_pct_min"] = strike_pct_min
+        if strike_pct_max is not None: overrides["strike_pct_max"] = strike_pct_max
+        if max_bid_ask_pct is not None: overrides["max_bid_ask_pct"] = max_bid_ask_pct
+        if min_annualized_return_pct is not None: overrides["min_annualized_return_pct"] = min_annualized_return_pct
+        if min_market_cap_b is not None: overrides["min_market_cap_b"] = min_market_cap_b
+        if max_symbols is not None: overrides["max_symbols"] = min(max_symbols, 10)
+        if max_results is not None: overrides["max_results"] = min(max(max_results, 1), 100)
+
+        opportunities = run_screener(
+            symbols=symbol_list,
+            max_results=min(max(max_results or 50, 1), 100),
+            overrides=overrides if overrides else None,
+        )
+        return {
+            "opportunities": opportunities,
+            "count": len(opportunities),
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Covered calls screener error: {str(e)}")

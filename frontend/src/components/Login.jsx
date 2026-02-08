@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import SiteLogo from './SiteLogo';
 
-const HARDCODED_USER = 'mai108';
-const HARDCODED_PASSWORD = 'admin$123';
+const USERS = {
+  mai108: 'admin$123',
+  nileshrb: 'Zaq!2wsx',
+};
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('');
@@ -12,8 +14,9 @@ function Login({ onLogin }) {
   const handleSubmit = (e) => {
     e.preventDefault();
     setError('');
-    if (username.trim().toLowerCase() === HARDCODED_USER.toLowerCase() && password === HARDCODED_PASSWORD) {
-      onLogin();
+    const uid = username.trim().toLowerCase();
+    if (USERS[uid] !== undefined && password === USERS[uid]) {
+      onLogin(uid);
     } else {
       setError('Invalid username or password.');
     }

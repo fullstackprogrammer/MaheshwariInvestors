@@ -1,22 +1,23 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getCspIdeas, getCspFilters } from '../services/api';
+import { getCcIdeas, getCcFilters } from '../services/api';
 import { Tooltip } from './ui/Tooltip';
 
-const CSP_HEADER_TOOLTIPS = {
+const CC_HEADER_TOOLTIPS = {
   ticker: 'Stock symbol. Click to open more details on Finviz.',
   current_stock_price: 'Current stock price.',
   market_cap_b: "Company's total market value in billions.",
-  put_strike: "Put strike price (price at which you'd buy the stock if assigned).",
+  call_strike: "Call strike price (price at which you'd sell the stock if assigned).",
   expiration: 'Option expiration date.',
   bid: 'Highest price a buyer will pay for the option.',
   ask: 'Lowest price a seller will accept for the option.',
   mid: 'Average of bid and ask (often used as fair value).',
-  return_dollars: 'Premium you receive for selling one put contract (100 shares).',
-  cash_required: 'Cash held to secure the put (strike × 100).',
-  return_pct: 'Premium as a percentage of cash required (not annualized).',
+  premium_per_contract: 'Premium you receive for selling one call contract (100 shares).',
+  covered_shares_required: 'Number of shares needed to cover one call (always 100).',
+  upside_if_called_pct: 'Percent gain if the stock is called away at the strike price.',
+  return_pct: 'Premium as a percentage of stock value (not annualized).',
   annualized_return_pct: 'Annualized premium return based on days until expiration.',
-  breakeven_at_expiry: 'Stock price at expiry where you neither gain nor lose (strike minus premium).',
-  pct_downside_to_strike: 'How far the current stock price is above the put strike (downside cushion).',
+  breakeven_price: 'Stock price where premium offsets a drop (stock price minus premium).',
+  pct_to_strike: 'How far the strike is above the current stock price (upside if called).',
   forward_pe: 'Forward price-to-earnings ratio.',
   analyst_target_price: 'Analyst average price target.',
 };
@@ -39,17 +40,16 @@ const SECTOR_OPTIONS = [
 const DEFAULT_FILTER_STATE = {
   sector: '',
   max_dte: 30,
-  strike_pct_min: 0.80,
-  strike_pct_max: 0.95,
+  strike_pct_min: 1.05,
+  strike_pct_max: 1.20,
   max_bid_ask_pct: 0.10,
-  target_upside_min: 0.10,
   min_annualized_return_pct: 0.10,
   min_market_cap_b: 20,
   max_symbols: 10,
   max_results: 50,
 };
 
-function CashSecuredPutsStrategy() {
+function CoveredCallsStrategy() {
   const [opportunities, setOpportunities] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -61,10 +61,10 @@ function CashSecuredPutsStrategy() {
   const [filtersLoaded, setFiltersLoaded] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(true);
 
-  const CSP_STORAGE_KEY = 'mai_csp_results';
+  const CC_STORAGE_KEY = 'mai_cc_results';
 
   useEffect(() => {
-    getCspFilters()
+    getCcFilters()
       .then((data) => {
         if (data && typeof data === 'object') {
           setFilters((prev) => ({ ...prev, ...data }));
@@ -76,7 +76,7 @@ function CashSecuredPutsStrategy() {
 
   useEffect(() => {
     try {
-      const raw = sessionStorage.getItem(CSP_STORAGE_KEY);
+      const raw = sessionStorage.getItem(CC_STORAGE_KEY);
       if (raw) {
         const data = JSON.parse(raw);
         if (Array.isArray(data.opportunities)) {
@@ -87,13 +87,11 @@ function CashSecuredPutsStrategy() {
     } catch (_) {}
   }, []);
 
-  const loadCspIdeas = useCallback(async () => {
+  const loadCcIdeas = useCallback(async () => {
     setLoading(true);
     setError(null);
     const params = {};
-    const skipKeys = new Set(['min_dte', 'min_avg_volume_m', 'debt_to_equity_max']);
     Object.keys(filters).forEach((k) => {
-      if (skipKeys.has(k)) return;
       const v = filters[k];
       if (k === 'sector') {
         if (v !== '' && v != null) params[k] = String(v);
@@ -109,24 +107,24 @@ function CashSecuredPutsStrategy() {
     if (params.max_symbols != null) params.max_symbols = Math.min(10, Math.max(1, Number(params.max_symbols)));
     if (params.max_results != null) params.max_results = Math.min(100, Math.max(1, Number(params.max_results)));
     try {
-      const data = await getCspIdeas(params);
+      const data = await getCcIdeas(params);
       const opps = data.opportunities ?? [];
       const asOfVal = data.as_of ?? null;
       setOpportunities(opps);
       setAsOf(asOfVal);
       try {
-        sessionStorage.setItem(CSP_STORAGE_KEY, JSON.stringify({ opportunities: opps, as_of: asOfVal }));
+        sessionStorage.setItem(CC_STORAGE_KEY, JSON.stringify({ opportunities: opps, as_of: asOfVal }));
       } catch (_) {}
     } catch (err) {
       setOpportunities([]);
-      setError(err?.response?.data?.detail || err?.message || 'Failed to load CSP ideas. Screener may take 1–2 minutes.');
+      setError(err?.response?.data?.detail || err?.message || 'Failed to load covered call ideas. Screener may take 1–2 minutes.');
     } finally {
       setLoading(false);
     }
   }, [filters, customSymbols, useCommunityStocks]);
 
   const runScreener = () => {
-    loadCspIdeas();
+    loadCcIdeas();
   };
 
   const updateFilter = (key, value) => {
@@ -141,7 +139,7 @@ function CashSecuredPutsStrategy() {
   };
 
   const resetFilters = () => {
-    getCspFilters().then((data) => {
+    getCcFilters().then((data) => {
       if (data && typeof data === 'object') setFilters((prev) => ({ ...prev, ...data }));
     });
   };
@@ -171,15 +169,15 @@ function CashSecuredPutsStrategy() {
   if (loading && opportunities.length === 0) {
     return (
       <div className="space-y-4">
-        <h2 className="text-3xl font-bold">Cash Secured Puts Strategy</h2>
+        <h2 className="text-3xl font-bold">Covered Calls Strategy</h2>
         <p className="text-dark-muted text-sm">
-          Conservative put-selling ideas. Adjust filters below and run the screener (1–2 min).
+          Adjust filters below and click Run screener to scan covered call opportunities.
         </p>
         <div className="flex flex-col items-center justify-center py-20 gap-4">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500" />
-          <p className="text-dark-muted">Running CSP screener…</p>
+          <p className="text-dark-muted">Running covered calls screener…</p>
           <p className="text-sm text-dark-muted max-w-md text-center">
-            Screening large-cap stocks and options (1–2 minutes). Results will appear when ready.
+            Screening stocks and call options (1–2 minutes). Results will appear when ready.
           </p>
         </div>
       </div>
@@ -202,12 +200,11 @@ function CashSecuredPutsStrategy() {
 
   return (
     <div className={`space-y-4 ${loading ? 'cursor-wait' : ''}`}>
-      <h2 className="text-3xl font-bold">Cash Secured Puts Strategy</h2>
+      <h2 className="text-3xl font-bold">Covered Calls Strategy</h2>
       <p className="text-dark-muted text-sm">
-        Adjust filters below and click Run screener. Optionally enter stocks/ETFs (comma-separated) to scan only those; leave empty for the default universe. Takes 1–2 minutes.
+        Adjust filters below and click Run screener to scan covered call opportunities.
       </p>
 
-      {/* Universe: Stocks/ETFs input with "Use MAI stocks" toggle on the right */}
       <div className="flex flex-col gap-2">
         <div className="flex items-start gap-8">
           <div className="flex flex-col gap-1 min-w-0 max-w-2xl flex-1">
@@ -216,7 +213,7 @@ function CashSecuredPutsStrategy() {
               type="text"
               value={customSymbols}
               onChange={(e) => setCustomSymbols(e.target.value)}
-              placeholder="e.g. AAPL, MSFT, SPY — leave empty to use default or MAI universe"
+              placeholder="e.g. AAPL, MSFT, SPY — leave empty to scan default MAI universe"
               className="w-full px-3 py-2 bg-dark-surface border border-dark-border rounded-lg text-white placeholder-dark-muted focus:border-blue-500 focus:outline-none"
             />
           </div>
@@ -237,7 +234,6 @@ function CashSecuredPutsStrategy() {
         </div>
       </div>
 
-      {/* Filters panel */}
       <div className="bg-dark-surface border border-dark-border rounded-lg overflow-hidden">
         <button
           type="button"
@@ -262,12 +258,11 @@ function CashSecuredPutsStrategy() {
               </select>
             </div>
             {filterInput('Max DTE', 'max_dte', 'Calendar days to expiration')}
-            {filterInput('Strike % min', 'strike_pct_min', 'e.g. 0.80 = 20% below spot', 'number', 0.01)}
-            {filterInput('Strike % max', 'strike_pct_max', 'e.g. 0.95 = 5% below spot', 'number', 0.01)}
-            {filterInput('Max bid-ask %', 'max_bid_ask_pct', 'Of premium e.g. 0.10 = 10%', 'number', 0.01)}
+            {filterInput('Strike % min', 'strike_pct_min', 'e.g. 1.05 = 5% above spot', 'number', 0.01)}
+            {filterInput('Strike % max', 'strike_pct_max', 'e.g. 1.15 = 15% above spot', 'number', 0.01)}
             {filterInput('Min annualized return', 'min_annualized_return_pct', 'Decimal e.g. 0.10 = 10%', 'number', 0.01)}
-            {filterInput('Target upside min', 'target_upside_min', 'e.g. 0.10 = 10%', 'number', 0.01)}
             {filterInput('Min market cap (B)', 'min_market_cap_b', '$B')}
+            {filterInput('Max bid-ask spread %', 'max_bid_ask_pct', 'Of premium e.g. 0.10 = 10%', 'number', 0.01)}
             {filterInput('Max symbols', 'max_symbols', 'Universe size to scan. Max 10.', 'number', 1)}
             {filterInput('Max results', 'max_results', 'Max 100.', 'number', 1)}
             <div className="flex items-end gap-2">
@@ -308,58 +303,61 @@ function CashSecuredPutsStrategy() {
           <thead>
             <tr className="bg-dark-surface border-b border-dark-border sticky top-0">
               <th className="px-3 py-2 text-left cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('ticker')}>
-                Ticker {getSortIcon('ticker')} <Tooltip content={CSP_HEADER_TOOLTIPS.ticker}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+                Ticker {getSortIcon('ticker')} <Tooltip content={CC_HEADER_TOOLTIPS.ticker}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
               <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('current_stock_price')}>
-                Price {getSortIcon('current_stock_price')} <Tooltip content={CSP_HEADER_TOOLTIPS.current_stock_price}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+                Stock Price {getSortIcon('current_stock_price')} <Tooltip content={CC_HEADER_TOOLTIPS.current_stock_price}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
               <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('market_cap_b')}>
-                Market cap {getSortIcon('market_cap_b')} <Tooltip content={CSP_HEADER_TOOLTIPS.market_cap_b}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+                Market cap {getSortIcon('market_cap_b')} <Tooltip content={CC_HEADER_TOOLTIPS.market_cap_b}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
-              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('put_strike')}>
-                Strike {getSortIcon('put_strike')} <Tooltip content={CSP_HEADER_TOOLTIPS.put_strike}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('call_strike')}>
+                Call Strike {getSortIcon('call_strike')} <Tooltip content={CC_HEADER_TOOLTIPS.call_strike}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
               <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors min-w-[7.5rem]" onClick={() => handleSort('expiration')}>
-                Expiry {getSortIcon('expiration')} <Tooltip content={CSP_HEADER_TOOLTIPS.expiration}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+                Expiry {getSortIcon('expiration')} <Tooltip content={CC_HEADER_TOOLTIPS.expiration}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
               <th className="px-3 py-2 text-right">
-                Bid <Tooltip content={CSP_HEADER_TOOLTIPS.bid}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+                Bid <Tooltip content={CC_HEADER_TOOLTIPS.bid}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
               <th className="px-3 py-2 text-right">
-                Ask <Tooltip content={CSP_HEADER_TOOLTIPS.ask}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+                Ask <Tooltip content={CC_HEADER_TOOLTIPS.ask}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
               <th className="px-3 py-2 text-right">
-                Mid <Tooltip content={CSP_HEADER_TOOLTIPS.mid}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+                Mid <Tooltip content={CC_HEADER_TOOLTIPS.mid}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
-              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('return_dollars')}>
-                Return $ (1 contract) {getSortIcon('return_dollars')} <Tooltip content={CSP_HEADER_TOOLTIPS.return_dollars}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('premium_per_contract')}>
+                Premium ($/contract) {getSortIcon('premium_per_contract')} <Tooltip content={CC_HEADER_TOOLTIPS.premium_per_contract}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
-              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('cash_required')}>
-                Cash req (1 contract) {getSortIcon('cash_required')} <Tooltip content={CSP_HEADER_TOOLTIPS.cash_required}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              <th className="px-3 py-2 text-right">
+                Covered Shares <Tooltip content={CC_HEADER_TOOLTIPS.covered_shares_required}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              </th>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('upside_if_called_pct')}>
+                Upside if Called % {getSortIcon('upside_if_called_pct')} <Tooltip content={CC_HEADER_TOOLTIPS.upside_if_called_pct}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
               <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('return_pct')}>
-                Return % {getSortIcon('return_pct')} <Tooltip content={CSP_HEADER_TOOLTIPS.return_pct}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+                Return % {getSortIcon('return_pct')} <Tooltip content={CC_HEADER_TOOLTIPS.return_pct}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
               <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('annualized_return_pct')}>
-                Ann. Return % {getSortIcon('annualized_return_pct')} <Tooltip content={CSP_HEADER_TOOLTIPS.annualized_return_pct}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+                Ann. Return % {getSortIcon('annualized_return_pct')} <Tooltip content={CC_HEADER_TOOLTIPS.annualized_return_pct}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
-              <th className="px-3 py-2 text-right">
-                Breakeven (expiry) <Tooltip content={CSP_HEADER_TOOLTIPS.breakeven_at_expiry}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('breakeven_price')}>
+                Breakeven Price {getSortIcon('breakeven_price')} <Tooltip content={CC_HEADER_TOOLTIPS.breakeven_price}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
-              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('pct_downside_to_strike')}>
-                % to Strike {getSortIcon('pct_downside_to_strike')} <Tooltip content={CSP_HEADER_TOOLTIPS.pct_downside_to_strike}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('pct_to_strike')}>
+                % to Strike {getSortIcon('pct_to_strike')} <Tooltip content={CC_HEADER_TOOLTIPS.pct_to_strike}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
-              <th className="px-3 py-2 text-right">
-                Fwd P/E <Tooltip content={CSP_HEADER_TOOLTIPS.forward_pe}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('forward_pe')}>
+                Fwd P/E {getSortIcon('forward_pe')} <Tooltip content={CC_HEADER_TOOLTIPS.forward_pe}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
-              <th className="px-3 py-2 text-right">
-                Target <Tooltip content={CSP_HEADER_TOOLTIPS.analyst_target_price}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('analyst_target_price')}>
+                Target {getSortIcon('analyst_target_price')} <Tooltip content={CC_HEADER_TOOLTIPS.analyst_target_price}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
             </tr>
           </thead>
           <tbody>
             {sortedOpportunities.map((opp, idx) => (
-              <tr key={`${opp.ticker}-${opp.put_strike}-${opp.expiration}-${idx}`} className="border-b border-dark-border hover:bg-dark-surface transition-colors">
+              <tr key={`${opp.ticker}-${opp.call_strike}-${opp.expiration}-${idx}`} className="border-b border-dark-border hover:bg-dark-surface transition-colors">
                 <td className="px-3 py-2 font-semibold">
                   <a
                     href={`https://finviz.com/quote.ashx?t=${encodeURIComponent(opp.ticker)}`}
@@ -372,17 +370,18 @@ function CashSecuredPutsStrategy() {
                 </td>
                 <td className="px-3 py-2 text-right">{formatCurrency(opp.current_stock_price)}</td>
                 <td className="px-3 py-2 text-right text-dark-muted">{opp.market_cap_b != null ? `$${Number(opp.market_cap_b).toFixed(1)}B` : '–'}</td>
-                <td className="px-3 py-2 text-right">{formatCurrency(opp.put_strike)}</td>
+                <td className="px-3 py-2 text-right">{formatCurrency(opp.call_strike)}</td>
                 <td className="px-3 py-2 text-right text-dark-muted text-sm whitespace-nowrap">{opp.expiration || '–'}</td>
                 <td className="px-3 py-2 text-right text-dark-muted">{formatCurrency(opp.bid)}</td>
                 <td className="px-3 py-2 text-right text-dark-muted">{formatCurrency(opp.ask)}</td>
                 <td className="px-3 py-2 text-right">{formatCurrency(opp.mid)}</td>
-                <td className="px-3 py-2 text-right font-semibold text-green-400">{formatCurrency(opp.return_dollars)}</td>
-                <td className="px-3 py-2 text-right text-dark-muted">{formatCurrency(opp.cash_required)}</td>
+                <td className="px-3 py-2 text-right font-semibold text-green-400">{formatCurrency(opp.premium_per_contract)}</td>
+                <td className="px-3 py-2 text-right text-dark-muted">{opp.covered_shares_required ?? 100}</td>
+                <td className="px-3 py-2 text-right">{formatPercent(opp.upside_if_called_pct)}</td>
                 <td className="px-3 py-2 text-right">{formatPercent(opp.return_pct)}</td>
                 <td className="px-3 py-2 text-right font-semibold text-green-400">{formatPercent(opp.annualized_return_pct)}</td>
-                <td className="px-3 py-2 text-right text-dark-muted">{formatCurrency(opp.breakeven_at_expiry)}</td>
-                <td className="px-3 py-2 text-right">{formatPercent(opp.pct_downside_to_strike)}</td>
+                <td className="px-3 py-2 text-right text-dark-muted">{formatCurrency(opp.breakeven_price)}</td>
+                <td className="px-3 py-2 text-right">{formatPercent(opp.pct_to_strike)}</td>
                 <td className="px-3 py-2 text-right text-dark-muted">{formatNumber(opp.forward_pe)}</td>
                 <td className="px-3 py-2 text-right text-dark-muted">{formatCurrency(opp.analyst_target_price)}</td>
               </tr>
@@ -390,11 +389,11 @@ function CashSecuredPutsStrategy() {
           </tbody>
         </table>
         {!loading && opportunities.length === 0 && !error && (
-          <div className="text-center py-8 text-dark-muted">No opportunities match the conservative filters. Try again later or refresh.</div>
+          <div className="text-center py-8 text-dark-muted">No opportunities match the filters. Try again later or adjust filters.</div>
         )}
       </div>
     </div>
   );
 }
 
-export default CashSecuredPutsStrategy;
+export default CoveredCallsStrategy;

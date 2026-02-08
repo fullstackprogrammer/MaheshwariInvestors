@@ -3,6 +3,7 @@ import Dashboard from './components/Dashboard';
 import InvestorRankings from './components/InvestorRankings';
 import StocksOverview from './components/StocksOverview';
 import CashSecuredPutsStrategy from './components/CashSecuredPutsStrategy';
+import CoveredCallsStrategy from './components/CoveredCallsStrategy';
 import Login from './components/Login';
 import { checkHealth, getMetrics, getInvestorRankings, getStocks } from './services/api';
 
@@ -18,9 +19,43 @@ const API_BASE_URL = getApiBaseUrl();
 const DATA_RETRY_MS = 15000;
 const DEBUG = true;
 
+const AUTH_STORAGE_KEY = 'mai_auth';
+const VIEW_STORAGE_KEY = 'mai_view';
+const CSP_STORAGE_KEY = 'mai_csp_results';
+const CC_STORAGE_KEY = 'mai_cc_results';
+const VALID_VIEWS = ['dashboard', 'investors', 'stocks', 'csp', 'cc'];
+
+function readStoredAuth() {
+  try {
+    const raw = sessionStorage.getItem(AUTH_STORAGE_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (data.authenticated && data.userId) return data;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function readStoredView(uid) {
+  try {
+    const saved = sessionStorage.getItem(VIEW_STORAGE_KEY);
+    if (!saved || !VALID_VIEWS.includes(saved)) return null;
+    if ((saved === 'csp' || saved === 'cc') && uid !== 'nileshrb') return null;
+    return saved;
+  } catch (_) {}
+  return null;
+}
+
 function App() {
-  const [authenticated, setAuthenticated] = useState(false);
-  const [activeView, setActiveView] = useState('dashboard');
+  const [authenticated, setAuthenticated] = useState(() => {
+    const auth = readStoredAuth();
+    return !!auth;
+  });
+  const [userId, setUserId] = useState(() => readStoredAuth()?.userId ?? null);
+  const [activeView, setActiveView] = useState(() => {
+    const auth = readStoredAuth();
+    return readStoredView(auth?.userId) ?? 'dashboard';
+  });
   const [lastUpdated, setLastUpdated] = useState(null);
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState(null);
@@ -30,7 +65,34 @@ function App() {
   const [metricsData, setMetricsData] = useState(null);
   const [dataRetrying, setDataRetrying] = useState(false);
 
-  const handleLogin = () => setAuthenticated(true);
+  const handleLogin = (uid) => {
+    setUserId(uid ?? null);
+    setAuthenticated(true);
+    try {
+      sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ authenticated: true, userId: uid }));
+    } catch (_) {}
+  };
+
+  const handleSignOut = () => {
+    setAuthenticated(false);
+    setUserId(null);
+    setActiveView('dashboard');
+    try {
+      sessionStorage.removeItem(AUTH_STORAGE_KEY);
+      sessionStorage.removeItem(VIEW_STORAGE_KEY);
+      sessionStorage.removeItem(CSP_STORAGE_KEY);
+      sessionStorage.removeItem(CC_STORAGE_KEY);
+    } catch (_) {}
+  };
+
+
+  useEffect(() => {
+    if (authenticated && activeView) {
+      try {
+        sessionStorage.setItem(VIEW_STORAGE_KEY, activeView);
+      } catch (_) {}
+    }
+  }, [authenticated, activeView]);
 
   useEffect(() => {
     if (!authenticated) {
@@ -160,18 +222,32 @@ function App() {
               >
                 Stocks Overview
               </button>
+              {userId === 'nileshrb' && (
+                <>
+                  <button
+                    onClick={() => setActiveView('csp')}
+                    className={`px-4 py-2 rounded-lg transition-colors ${
+                      activeView === 'csp'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-dark-surface text-dark-muted hover:bg-dark-border'
+                    }`}
+                  >
+                    Cash Secured Puts Strategy
+                  </button>
+                  <button
+                    onClick={() => setActiveView('cc')}
+                    className={`px-4 py-2 rounded-lg transition-colors ${
+                      activeView === 'cc'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-dark-surface text-dark-muted hover:bg-dark-border'
+                    }`}
+                  >
+                    Covered Calls Strategy
+                  </button>
+                </>
+              )}
               <button
-                onClick={() => setActiveView('csp')}
-                className={`px-4 py-2 rounded-lg transition-colors ${
-                  activeView === 'csp'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-dark-surface text-dark-muted hover:bg-dark-border'
-                }`}
-              >
-                Cash Secured Puts Strategy
-              </button>
-              <button
-                onClick={() => setAuthenticated(false)}
+                onClick={handleSignOut}
                 className="px-4 py-2 rounded-lg bg-dark-surface text-dark-muted hover:bg-dark-border transition-colors"
               >
                 Sign out
@@ -215,7 +291,8 @@ function App() {
         {activeView === 'stocks' && (
           <StocksOverview stocks={stocksData} dataRetrying={dataRetrying} />
         )}
-        {activeView === 'csp' && <CashSecuredPutsStrategy />}
+        {activeView === 'csp' && userId === 'nileshrb' && <CashSecuredPutsStrategy />}
+        {activeView === 'cc' && userId === 'nileshrb' && <CoveredCallsStrategy />}
       </main>
 
       {/* Footer with footnotes */}

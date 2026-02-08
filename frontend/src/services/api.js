@@ -133,6 +133,39 @@ export const getCspIdeas = async (params = {}) => {
   return response.data;
 };
 
+/** Covered calls screener default filters. */
+export const getCcFilters = async () => {
+  const response = await api.get('/covered-calls-filters');
+  return response.data;
+};
+
+/** Covered call ideas. Pass filter params (screener can take 1–2 min). */
+export const getCcIdeas = async (params = {}) => {
+  const requestParams = {
+    max_results: params.max_results ?? 50,
+    max_dte: params.max_dte,
+    sector: params.sector,
+    strike_pct_min: params.strike_pct_min,
+    strike_pct_max: params.strike_pct_max,
+    max_bid_ask_pct: params.max_bid_ask_pct,
+    min_annualized_return_pct: params.min_annualized_return_pct,
+    min_market_cap_b: params.min_market_cap_b,
+    max_symbols: params.max_symbols,
+  };
+  if (params.symbols && String(params.symbols).trim()) {
+    requestParams.symbols = String(params.symbols).trim();
+  }
+  if (params.use_community_universe) {
+    requestParams.use_community_universe = true;
+  }
+  const response = await axios.get(`${API_BASE_URL}/covered-calls-ideas`, {
+    params: requestParams,
+    timeout: 120000,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return response.data;
+};
+
 /** MAI index vs benchmarks (can be slow on first load). */
 export const getIndexPerformance = async () => {
   const response = await axios.get(`${API_BASE_URL}/index-performance`, {
