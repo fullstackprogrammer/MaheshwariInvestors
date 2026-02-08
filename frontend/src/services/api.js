@@ -96,10 +96,37 @@ export const refreshData = async () => {
   return response.data;
 };
 
-/** Conservative cash-secured put ideas (screener can take 1–2 minutes). */
-export const getCspIdeas = async (maxResults = 50) => {
+/** Default CSP screener filters (for UI). */
+export const getCspFilters = async () => {
+  const response = await axios.get(`${API_BASE_URL}/csp-filters`, {
+    timeout: 10000,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return response.data;
+};
+
+/** Conservative cash-secured put ideas. Pass filter params to adjust screener (screener can take 1–2 min). */
+export const getCspIdeas = async (params = {}) => {
+  const requestParams = {
+    max_results: params.max_results ?? 50,
+    max_dte: params.max_dte,
+    sector: params.sector,
+    strike_pct_min: params.strike_pct_min,
+    strike_pct_max: params.strike_pct_max,
+    max_bid_ask_pct: params.max_bid_ask_pct,
+    target_upside_min: params.target_upside_min,
+    min_annualized_return_pct: params.min_annualized_return_pct,
+    min_market_cap_b: params.min_market_cap_b,
+    max_symbols: params.max_symbols,
+  };
+  if (params.symbols && String(params.symbols).trim()) {
+    requestParams.symbols = String(params.symbols).trim();
+  }
+  if (params.use_community_universe) {
+    requestParams.use_community_universe = true;
+  }
   const response = await axios.get(`${API_BASE_URL}/csp-ideas`, {
-    params: { max_results: maxResults },
+    params: requestParams,
     timeout: 120000,
     headers: { 'Content-Type': 'application/json' },
   });

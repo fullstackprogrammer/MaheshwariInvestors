@@ -197,7 +197,16 @@ function StocksOverview({ stocks: stocksProp = null, dataRetrying = false }) {
                 key={stock.symbol}
                 className="border-b border-dark-border hover:bg-dark-surface transition-colors"
               >
-                <td className="px-4 py-3 font-semibold">{stock.symbol}</td>
+                <td className="px-4 py-3 font-semibold">
+                  <a
+                    href={`https://finviz.com/quote.ashx?t=${encodeURIComponent(stock.symbol)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-400 hover:text-blue-300 underline"
+                  >
+                    {stock.symbol}
+                  </a>
+                </td>
                 <td className="px-4 py-3">{stock.company_name}</td>
                 <td className="px-4 py-3 text-dark-muted">{stock.sector}</td>
                 <td className="px-4 py-3 text-dark-muted text-sm">{stock.industry}</td>

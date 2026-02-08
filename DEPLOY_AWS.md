@@ -35,7 +35,7 @@ To avoid repeating manual steps when you set up a new instance or redeploy:
    - **PowerShell:** `.\deploy\deploy.ps1` (frontend only) or `.\deploy\deploy.ps1 -BackendToo` (frontend + backend + data).
    - **Bash/WSL:** `./deploy/deploy.sh` or `./deploy/deploy.sh --backend-too`.
 
-The script builds the frontend with `VITE_API_BASE_URL=http://YOUR_EC2_IP:8000`, uploads `frontend/dist` to the server, and restarts the backend and Nginx.
+The script builds the frontend with `VITE_API_BASE_URL=http://YOUR_EC2_IP:8000`, uploads `frontend/dist` to the server, and reloads Nginx. **Backend is restarted only when using `-BackendToo` / `--backend-too`**, so a frontend-only deploy does not clear the in-memory cache and avoids 503s and 2–3 minute cache warming.
 
 ---
 

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import Dashboard from './components/Dashboard';
 import InvestorRankings from './components/InvestorRankings';
 import StocksOverview from './components/StocksOverview';
+import CashSecuredPutsStrategy from './components/CashSecuredPutsStrategy';
 import Login from './components/Login';
 import { checkHealth, getMetrics, getInvestorRankings, getStocks } from './services/api';
 
@@ -23,9 +24,10 @@ function App() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState(null);
-  // Rankings and stocks loaded once after login; tabs use this (no per-tab API calls)
+  // Rankings, stocks, and metrics loaded once after login; Dashboard/Rankings/Stocks use this (cache-backed)
   const [rankingsData, setRankingsData] = useState(null);
   const [stocksData, setStocksData] = useState(null);
+  const [metricsData, setMetricsData] = useState(null);
   const [dataRetrying, setDataRetrying] = useState(false);
 
   const handleLogin = () => setAuthenticated(true);
@@ -38,30 +40,34 @@ function App() {
     let cancelled = false;
     let dataRetryTimeoutId = null;
 
-    async function loadRankingsAndStocks() {
+    async function loadRankingsStocksAndMetrics() {
       try {
         setDataRetrying(false);
-        if (DEBUG) console.log('[App] loadRankingsAndStocks: starting');
-        const [rankings, stocks] = await Promise.all([
+        if (DEBUG) console.log('[App] loadRankingsStocksAndMetrics: starting');
+        const [rankings, stocks, metrics] = await Promise.all([
           getInvestorRankings(),
           getStocks(),
+          getMetrics(),
         ]);
         if (cancelled) return;
-        if (DEBUG) console.log('[App] loadRankingsAndStocks: OK', rankings?.length, 'rankings', stocks?.length, 'stocks');
+        if (DEBUG) console.log('[App] loadRankingsStocksAndMetrics: OK', rankings?.length, 'rankings', stocks?.length, 'stocks');
         setRankingsData(rankings);
         setStocksData(stocks);
+        setMetricsData(metrics);
+        if (metrics?.last_updated) setLastUpdated(metrics.last_updated);
         setApiError(null);
       } catch (err) {
         if (cancelled) return;
         if (err.response?.status === 503) {
-          if (DEBUG) console.log('[App] loadRankingsAndStocks: 503 cache warming, retry in 15s');
+          if (DEBUG) console.log('[App] loadRankingsStocksAndMetrics: 503 cache warming, retry in 15s');
           setDataRetrying(true);
-          dataRetryTimeoutId = setTimeout(loadRankingsAndStocks, DATA_RETRY_MS);
+          dataRetryTimeoutId = setTimeout(loadRankingsStocksAndMetrics, DATA_RETRY_MS);
           return;
         }
-        console.error('[App] loadRankingsAndStocks failed:', err?.message || err, err.response?.status);
+        console.error('[App] loadRankingsStocksAndMetrics failed:', err?.message || err, err.response?.status);
         setRankingsData([]);
         setStocksData([]);
+        setMetricsData(null);
       }
     }
 
@@ -73,21 +79,7 @@ function App() {
         if (DEBUG) console.log('[App] init: health OK, loading rankings+stocks and metrics');
         setLoading(false);
         setApiError(null);
-        loadRankingsAndStocks();
-        getMetrics()
-          .then((metrics) => {
-            if (!cancelled) {
-              if (DEBUG) console.log('[App] getMetrics OK', metrics?.last_updated);
-              setLastUpdated(metrics.last_updated);
-              setApiError(null);
-            }
-          })
-          .catch((err) => {
-            if (!cancelled) {
-              console.error('[App] getMetrics failed:', err?.message || err, err.response?.status);
-              setApiError('Backend data is still loading or unavailable. If the backend just started, wait 2–3 minutes for the cache to warm. Rankings and stocks will appear when ready.');
-            }
-          });
+        loadRankingsStocksAndMetrics();
       } catch (error) {
         if (!cancelled) {
           setLoading(false);
@@ -169,6 +161,16 @@ function App() {
                 Stocks Overview
               </button>
               <button
+                onClick={() => setActiveView('csp')}
+                className={`px-4 py-2 rounded-lg transition-colors ${
+                  activeView === 'csp'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-dark-surface text-dark-muted hover:bg-dark-border'
+                }`}
+              >
+                Cash Secured Puts Strategy
+              </button>
+              <button
                 onClick={() => setAuthenticated(false)}
                 className="px-4 py-2 rounded-lg bg-dark-surface text-dark-muted hover:bg-dark-border transition-colors"
               >
@@ -204,13 +206,16 @@ function App() {
 
       {/* Main Content - rankings/stocks loaded once from cache; tabs display from props */}
       <main className="container mx-auto px-4 py-8 flex-1">
-        {activeView === 'dashboard' && <Dashboard />}
+        {activeView === 'dashboard' && (
+          <Dashboard metrics={metricsData} dataRetrying={dataRetrying} />
+        )}
         {activeView === 'investors' && (
           <InvestorRankings rankings={rankingsData} dataRetrying={dataRetrying} />
         )}
         {activeView === 'stocks' && (
           <StocksOverview stocks={stocksData} dataRetrying={dataRetrying} />
         )}
+        {activeView === 'csp' && <CashSecuredPutsStrategy />}
       </main>
 
       {/* Footer with footnotes */}

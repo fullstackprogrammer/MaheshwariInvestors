@@ -5,12 +5,14 @@ import KPICard from './KPICard';
 const RETRY_AFTER_MS = 15000; // 15s when backend returns 503 (cache warming)
 const INDEX_POLL_MS = 15 * 60 * 1000; // 15 min, matches backend refresh
 
-function Dashboard() {
-  const [metrics, setMetrics] = useState(null);
+function Dashboard({ metrics: metricsProp = null, dataRetrying = false }) {
+  const [metricsState, setMetricsState] = useState(null);
   const [indexPerformance, setIndexPerformance] = useState(null);
   const [viewMode, setViewMode] = useState('investors'); // 'investors' or 'stocks'
   const [loading, setLoading] = useState(true);
-  const [cacheWarming, setCacheWarming] = useState(false); // true when we got 503 and are retrying
+  const [cacheWarming, setCacheWarming] = useState(false);
+  // Use metrics from App (cache-backed) when provided; otherwise fall back to local fetch
+  const metrics = metricsProp ?? metricsState;
 
   useEffect(() => {
     let cancelled = false;
@@ -24,7 +26,7 @@ function Dashboard() {
         const data = await getMetrics();
         if (cancelled) return;
         console.info('Dashboard: data loaded');
-        setMetrics(data);
+        setMetricsState(data);
         setLoading(false);
       } catch (error) {
         if (cancelled) return;
@@ -56,7 +58,7 @@ function Dashboard() {
         });
     };
 
-    loadMetrics();
+    if (metricsProp == null) loadMetrics();
     loadIndex();
     const interval = setInterval(loadIndex, INDEX_POLL_MS);
     return () => {
@@ -65,17 +67,17 @@ function Dashboard() {
       if (indexRetryTimeoutId) clearTimeout(indexRetryTimeoutId);
       clearInterval(interval);
     };
-  }, []);
+  }, [metricsProp]);
 
-  if (loading) {
+  if (metrics == null) {
     return (
       <div className="flex flex-col items-center justify-center py-20 gap-4">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
         <p className="text-dark-muted">
-          {cacheWarming ? 'Backend is preparing data after restart. Retrying in 15s…' : 'Loading dashboard…'}
+          {dataRetrying || cacheWarming ? 'Backend is preparing data after restart. Retrying in 15s…' : 'Loading dashboard…'}
         </p>
         <p className="text-sm text-dark-muted">
-          {cacheWarming
+          {dataRetrying || cacheWarming
             ? 'Once the cache is warm, data will load from cache and future loads will be fast.'
             : 'First load can take 2–3 minutes while the backend fetches stock data.'}
         </p>
@@ -83,13 +85,8 @@ function Dashboard() {
     );
   }
 
-  if (!metrics) {
-    return (
-      <div className="text-center py-20">
-        <p className="text-red-400">Failed to load dashboard data</p>
-      </div>
-    );
-  }
+  const topInvestors = Array.isArray(metrics.top_investors) ? metrics.top_investors : [];
+  const topStocks = Array.isArray(metrics.top_stocks) ? metrics.top_stocks : [];
 
   return (
     <div className="space-y-6">
@@ -137,8 +134,8 @@ function Dashboard() {
         </div>
         <div className="bg-dark-surface border border-dark-border rounded-lg p-6">
           <p className="text-dark-muted text-sm mb-1">Best YTD Return</p>
-          <p className={`text-3xl font-bold ${metrics.top_investors[0]?.ytd >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {metrics.top_investors[0]?.ytd?.toFixed(2) ?? 0}%
+          <p className={`text-3xl font-bold ${(topInvestors[0]?.ytd ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {(topInvestors[0]?.ytd ?? 0).toFixed(2)}%
           </p>
         </div>
         <div className="bg-dark-surface border border-dark-border rounded-lg p-6">
@@ -156,23 +153,23 @@ function Dashboard() {
         </h3>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
           {viewMode === 'investors'
-            ? metrics.top_investors.map((investor, idx) => (
+            ? topInvestors.map((investor, idx) => (
                 <KPICard
                   key={investor.alias}
                   rank={idx + 1}
                   title={investor.alias}
                   value={investor.ytd}
-                  subtitle={`Portfolio: $${investor.portfolio_value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+                  subtitle={`Portfolio: $${(investor.portfolio_value ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
                   type="investor"
                 />
               ))
-            : metrics.top_stocks.map((stock, idx) => (
+            : topStocks.map((stock, idx) => (
                 <KPICard
                   key={stock.symbol}
                   rank={idx + 1}
                   title={stock.symbol}
                   value={stock.ytd}
-                  subtitle={stock.company_name}
+                  subtitle={stock.company_name ?? ''}
                   type="stock"
                 />
               ))}

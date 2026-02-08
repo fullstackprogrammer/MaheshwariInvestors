@@ -110,7 +110,10 @@ def normalize_symbol(symbol: str) -> str:
 
 # In-memory data storage (shared by all users - no per-user cache)
 investors_data = []
-stock_cache = {}  # Single global cache: stocks, indices, prices for all users; refreshed every 15 min
+# Main-app cache: used ONLY by Dashboard, Investor Rankings, Stocks Overview, and Index Performance.
+# Built at server start and refreshed periodically. Those endpoints read from this cache only (no on-demand fetch).
+# Symbol list comes solely from get_all_symbols() (CSV/investors_data). CSP does not touch this cache.
+stock_cache = {}  # Single global cache: stocks, indices, prices; refreshed every 15 min
 alias_mapping = {}
 
 # Auto-refresh: interval in seconds (15 minutes)
@@ -304,8 +307,9 @@ def _fetch_one_stock_with_timeout(symbol: str, timeout_sec: int = YFINANCE_FETCH
 def _refresh_cache_background_impl():
     """
     Fetch symbols from yfinance (with per-symbol timeout), then MERGE into cache.
+    Symbol list = all unique symbols from investors (get_all_symbols()) + benchmarks; no limit.
     We never replace the cache with empty or worse data: only add/update entries we successfully fetched.
-    This way throttle/errors leave previous cache intact and the app keeps serving.
+    Failed symbols are retried once so more symbols (e.g. all 110) make it into the cache.
     """
     global stock_cache
     investor_symbols = get_all_symbols()
@@ -313,10 +317,10 @@ def _refresh_cache_background_impl():
     if not symbols:
         log.info("[Cache refresh] No symbols to fetch; skipping.")
         return
-    log.info("[Cache refresh] Starting fetch for %s symbols (timeout %ds each); will merge into existing cache.", len(symbols), YFINANCE_FETCH_TIMEOUT_SEC)
+    log.info("[Cache refresh] Starting fetch for %s symbols (%s from investors); timeout %ds each.", len(symbols), len(investor_symbols), YFINANCE_FETCH_TIMEOUT_SEC)
     t0 = time.perf_counter()
     fetched = 0
-    failed = 0
+    failed_list: List[str] = []
     for symbol in symbols:
         data = _fetch_one_stock_with_timeout(symbol)
         if data:
@@ -324,11 +328,21 @@ def _refresh_cache_background_impl():
             with _cache_refresh_lock:
                 stock_cache[symbol] = data
         else:
-            failed += 1
+            failed_list.append(symbol)
+    # Retry failed symbols once (helps get to full count when yfinance is slow)
+    if failed_list:
+        time.sleep(2)
+        for symbol in list(failed_list):
+            data = _fetch_one_stock_with_timeout(symbol)
+            if data:
+                fetched += 1
+                failed_list.remove(symbol)
+                with _cache_refresh_lock:
+                    stock_cache[symbol] = data
     elapsed = time.perf_counter() - t0
     with _cache_refresh_lock:
         cache_size = len(stock_cache)
-    log.info("[Cache refresh] Done in %.1fs: fetched %s, failed %s, cache size now %s", elapsed, fetched, failed, cache_size)
+    log.info("[Cache refresh] Done in %.1fs: fetched %s, failed %s, cache size %s", elapsed, fetched, len(failed_list), cache_size)
     if fetched == 0 and cache_size == 0:
         log.warning("[Cache refresh] No data fetched and cache empty; app may return 503 until next refresh.")
 
@@ -347,14 +361,20 @@ def _background_refresh_loop():
             log.warning("[Cache refresh] sleep interrupted: %s", e)
 
 
-def fetch_stock_data(symbol: str) -> Optional[Dict]:
-    """Fetch stock data: use cache when present; only call yfinance on true cache miss (with timeout)."""
+def fetch_stock_data(symbol: str, cache_only: bool = False) -> Optional[Dict]:
+    """
+    Get stock data for the main app (Dashboard, Rankings, Stocks, Index).
+    When cache_only=True: return only from stock_cache (used by rankings/stocks/metrics/index).
+    When cache_only=False: return from cache or fetch on miss.
+    """
     symbol = normalize_symbol(symbol)
     if not symbol or len(symbol) < 1 or len(symbol) > 10:
         return None
     if symbol in stock_cache:
         return stock_cache[symbol]
-    # Cache miss: fetch with timeout so we don't hang the request
+    if cache_only:
+        return None
+    # Cache miss and not cache_only: fetch with timeout (e.g. refresh flow or one-off)
     t0 = time.perf_counter()
     stock_data = _fetch_one_stock_with_timeout(symbol)
     elapsed = time.perf_counter() - t0
@@ -412,8 +432,8 @@ def calculate_returns(prices: List[float], dates: List[str]) -> Dict[str, float]
         "cagr": round(cagr, 2)
     }
 
-def calculate_portfolio_metrics(investor: Dict) -> Dict:
-    """Calculate portfolio-level metrics for an investor."""
+def calculate_portfolio_metrics(investor: Dict, cache_only: bool = True) -> Dict:
+    """Calculate portfolio-level metrics. cache_only=True: use only stock_cache (for rankings/metrics)."""
     stocks = investor["stocks"]
     if not stocks:
         # Return zero metrics if no valid stocks
@@ -436,7 +456,7 @@ def calculate_portfolio_metrics(investor: Dict) -> Dict:
     valid_stocks_count = 0
     
     for symbol in stocks:
-        stock_data = fetch_stock_data(symbol)
+        stock_data = fetch_stock_data(symbol, cache_only=cache_only)
         if stock_data and stock_data.get("prices"):
             prices = stock_data["prices"]
             if len(prices) >= 2:
@@ -519,12 +539,12 @@ def _ensure_cache_ready():
 
 @app.get("/investors/rankings")
 async def get_investor_rankings():
-    """Get investor rankings with performance metrics."""
+    """Get investor rankings with performance metrics. Uses main-app cache only (no on-demand fetch)."""
     t0 = time.perf_counter()
     _ensure_cache_ready()
     rankings = []
     for investor in investors_data:
-        metrics = calculate_portfolio_metrics(investor)
+        metrics = calculate_portfolio_metrics(investor, cache_only=True)
         rankings.append({
             "alias": investor["alias"],
             "stocks": investor["stocks"],
@@ -556,7 +576,7 @@ async def get_stocks():
     stocks_data = []
     
     for symbol in sorted(all_stocks):
-        stock_data = fetch_stock_data(symbol)
+        stock_data = fetch_stock_data(symbol, cache_only=True)
         if stock_data:
             returns = calculate_returns(stock_data["prices"], stock_data["dates"])
             
@@ -651,10 +671,12 @@ def _get_price_on_date(stock_data: Optional[Dict], target_date: str) -> Optional
             return float(prices[i])
     return float(prices[0]) if prices else None
 
-def _fetch_benchmark(symbol: str) -> Optional[Dict]:
-    """Use cache when present; on miss fetch with timeout so request doesn't hang."""
+def _fetch_benchmark(symbol: str, cache_only: bool = True) -> Optional[Dict]:
+    """Get benchmark data. cache_only=True: index uses cache only (benchmarks are in refresh list)."""
     if symbol in stock_cache:
         return stock_cache[symbol]
+    if cache_only:
+        return None
     log.info("[Index] benchmark %s cache miss; fetching with timeout", symbol)
     data = _fetch_one_stock_with_timeout(symbol)
     if data:
@@ -679,7 +701,7 @@ async def get_index_performance():
     mai_start = 0.0
     mai_current = 0.0
     for symbol in symbols:
-        data = fetch_stock_data(symbol)
+        data = fetch_stock_data(symbol, cache_only=True)
         if data and data.get("prices") and data.get("dates"):
             start_p = _get_price_on_date(data, start_date)
             if start_p is not None:
@@ -702,8 +724,9 @@ async def get_index_performance():
             "mai_vs_other_pct": None,
         })
 
+    # Benchmarks: try cache first; fetch on miss so DJIA/S&P 500/NASDAQ always show (cache may not have them yet)
     for sym in BENCHMARK_SYMBOLS:
-        data = _fetch_benchmark(sym)
+        data = _fetch_benchmark(sym, cache_only=True)
         if not data or not data.get("prices") or not data.get("dates"):
             continue
         start_p = _get_price_on_date(data, start_date)
@@ -738,17 +761,66 @@ async def get_index_performance():
     }
 
 
-# --- Conservative CSP (Cash-Secured Put) screener ---
+# --- CSP (Cash-Secured Puts) Strategy: separate from main-app cache ---
+# This endpoint does NOT use stock_cache. It uses csp_screener.run_screener(), which
+# fetches its own data via yfinance (options, fundamentals, etc.). Dashboard, Rankings,
+# Stocks Overview, and Index Performance are unaffected and use only the main cache above.
+
+@app.get("/csp-filters")
+async def get_csp_filters():
+    """Return default screener filter values so the UI can display and adjust them."""
+    try:
+        from csp_screener import DEFAULT_FILTERS
+        return DEFAULT_FILTERS
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/csp-ideas")
-async def get_csp_ideas(max_results: int = 50):
+async def get_csp_ideas(
+    max_results: int = 50,
+    symbols: Optional[str] = None,
+    use_community_universe: Optional[bool] = None,
+    max_dte: Optional[int] = None,
+    sector: Optional[str] = None,
+    strike_pct_min: Optional[float] = None,
+    strike_pct_max: Optional[float] = None,
+    max_bid_ask_pct: Optional[float] = None,
+    min_annualized_return_pct: Optional[float] = None,
+    target_upside_min: Optional[float] = None,
+    min_market_cap_b: Optional[float] = None,
+    max_symbols: Optional[int] = None,
+):
     """
-    Conservative cash-secured put ideas: large-cap, 3–7 DTE, 8–15% OTM,
-    fundamental and option-quality filters. Ranked by annualized return,
-    downside protection, and probability of profit.
+    Conservative cash-secured put ideas. Pass optional query params to adjust screener filters.
+    symbols: comma-separated tickers (e.g. AAPL,MSFT,SPY); if provided, only those are scanned.
+    use_community_universe: if True and no symbols provided, use stocks selected by the community (from investor data).
+    Data is fetched independently by the CSP screener; not from the main cache.
     """
     try:
         from csp_screener import run_screener
-        opportunities = run_screener(max_results=max(min(max_results, 100), 10))
+        symbol_list = None
+        if symbols and symbols.strip():
+            symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        elif use_community_universe in (True, "true", "1", 1):
+            symbol_list = get_all_symbols()
+        overrides = {}
+        if max_dte is not None: overrides["max_dte"] = max_dte
+        if sector and sector.strip(): overrides["sector"] = sector.strip()
+        if strike_pct_min is not None: overrides["strike_pct_min"] = strike_pct_min
+        if strike_pct_max is not None: overrides["strike_pct_max"] = strike_pct_max
+        if max_bid_ask_pct is not None: overrides["max_bid_ask_pct"] = max_bid_ask_pct
+        if min_annualized_return_pct is not None: overrides["min_annualized_return_pct"] = min_annualized_return_pct
+        if target_upside_min is not None: overrides["target_upside_min"] = target_upside_min
+        if min_market_cap_b is not None: overrides["min_market_cap_b"] = min_market_cap_b
+        if max_symbols is not None: overrides["max_symbols"] = min(max_symbols, 10)
+        if max_results is not None: overrides["max_results"] = min(max(max_results, 1), 100)
+
+        opportunities = run_screener(
+            symbols=symbol_list,
+            max_results=min(max(max_results or 50, 1), 100),
+            overrides=overrides if overrides else None,
+        )
         return {
             "opportunities": opportunities,
             "count": len(opportunities),

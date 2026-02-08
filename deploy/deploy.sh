@@ -58,9 +58,16 @@ if [ "$BACKEND_TOO" = true ]; then
   [ -f "$REPO_ROOT/DFWInvestors2026StockPicks.csv" ] && scp -i "$KEY_PATH" "$REPO_ROOT/DFWInvestors2026StockPicks.csv" "${EC2_USER}@${EC2_IP}:${REMOTE_APP_DIR}/"
 fi
 
-# 4. Restart backend and reload Nginx on EC2
-echo "Restarting backend and Nginx on EC2..."
-ssh -i "$KEY_PATH" -o StrictHostKeyChecking=accept-new "${EC2_USER}@${EC2_IP}" \
-  "sudo systemctl restart maheshwari-api; sudo systemctl reload nginx; echo Done"
+# 4. Reload Nginx (always). Restart backend only if we deployed backend (avoids clearing cache on frontend-only deploy)
+echo "Reloading Nginx on EC2..."
+if [ "$BACKEND_TOO" = true ]; then
+  echo "Restarting backend (backend was updated)..."
+  ssh -i "$KEY_PATH" -o StrictHostKeyChecking=accept-new "${EC2_USER}@${EC2_IP}" \
+    "sudo systemctl restart maheshwari-api; sudo systemctl reload nginx; echo Done"
+else
+  ssh -i "$KEY_PATH" -o StrictHostKeyChecking=accept-new "${EC2_USER}@${EC2_IP}" \
+    "sudo systemctl reload nginx; echo Done"
+  echo "Backend not restarted (frontend-only deploy). Cache remains warm."
+fi
 
 echo "Deploy done. App: http://${EC2_IP}"

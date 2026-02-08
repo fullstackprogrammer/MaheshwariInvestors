@@ -65,9 +65,14 @@ if ($BackendToo) {
     }
 }
 
-# 4. Restart backend and reload Nginx on EC2
-$RemoteCmd = "sudo systemctl restart maheshwari-api; sudo systemctl reload nginx; echo Done"
-Write-Host "Restarting backend and Nginx on EC2..." -ForegroundColor Cyan
+# 4. Reload Nginx (always). Restart backend only if we deployed backend (avoids clearing cache on frontend-only deploy)
+if ($BackendToo) {
+    Write-Host "Restarting backend and Nginx on EC2..." -ForegroundColor Cyan
+    $RemoteCmd = "sudo systemctl restart maheshwari-api; sudo systemctl reload nginx; echo Done"
+} else {
+    Write-Host "Reloading Nginx on EC2 (backend not restarted; cache stays warm)..." -ForegroundColor Cyan
+    $RemoteCmd = "sudo systemctl reload nginx; echo Done"
+}
 & ssh -i $KEY_PATH -o StrictHostKeyChecking=accept-new "${EC2_USER}@${EC2_IP}" $RemoteCmd
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
