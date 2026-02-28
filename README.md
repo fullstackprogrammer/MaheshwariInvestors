@@ -88,6 +88,32 @@ On Windows CMD/PowerShell, if the alias fails, use the script (Option 2) instead
 
 - **Ctrl+Shift+G** → Source Control → stage all (click **+** next to Changes) → type message → **Ctrl+Enter** to commit → **Sync** or **Push**.
 
+## Run locally on Windows
+
+**Option A – One command (PowerShell)**  
+From the project root, in a new PowerShell window:
+```powershell
+# If you get "running scripts is disabled", run this once in the same window:
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+
+.\scripts\run-local.ps1
+```
+This starts the backend (port 8000) and frontend (port 5173). Open **http://localhost:5173** in your browser.
+
+**Option B – Two terminals**
+
+| Terminal 1 – Backend | Terminal 2 – Frontend |
+|----------------------|------------------------|
+| `cd backend` | `cd frontend` |
+| `python -m venv venv` *(once)* | `npm install` *(once)* |
+| `.\venv\Scripts\Activate.ps1` *(or `venv\Scripts\activate.bat` in cmd)* | `npm run dev` |
+| `pip install --only-binary :all: -r requirements.txt` *(once)* | |
+| `uvicorn main:app --reload --port 8000` | |
+
+Or use **`.\backend\run.bat`** in Terminal 1 (no venv activate needed if you run it from `backend` after creating the venv and installing deps).
+
+---
+
 ## Setup Instructions
 
 ### Prerequisites
@@ -134,8 +160,14 @@ pip install -r requirements.txt
 ```bash
 uvicorn main:app --reload --port 8000
 ```
+If you open the frontend via an IP (e.g. `http://172.16.x.x:5173`), use `--host 0.0.0.0` so the API is reachable:
+```bash
+uvicorn main:app --reload --port 8000 --host 0.0.0.0
+```
 
-The backend will be available at `http://localhost:8000`
+The backend will be available at **`http://localhost:8000`** (no `/api` prefix—use e.g. `http://localhost:8000/health`, `http://localhost:8000/investors`).
+
+**Note:** After startup, the backend warms its cache for 2–3 minutes. `/` and `/health` work immediately; `/investors/rankings`, `/stocks`, `/metrics` return **503** until the cache is ready. Wait a few minutes and retry, or check `/health` for `cache_ready: true`.
 
 ### Frontend Setup
 

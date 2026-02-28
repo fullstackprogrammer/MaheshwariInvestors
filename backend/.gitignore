@@ -10,3 +10,4 @@ ENV/
 *.db
 *.sqlite
 .DS_Store
+_sp500_constituents.csv
