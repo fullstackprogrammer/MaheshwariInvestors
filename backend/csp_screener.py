@@ -10,8 +10,13 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None  # Python < 3.9
 
 import pandas as pd
 import yfinance as yf
@@ -95,6 +100,22 @@ def _calendar_days_between(start: datetime, end: datetime) -> int:
     return (end.date() - start.date()).days
 
 
+def _is_us_market_open() -> bool:
+    """True if US market (NYSE/NASDAQ) is open: Mon–Fri 9:30 AM–4:00 PM Eastern."""
+    if ZoneInfo is None:
+        return True  # no zoneinfo: assume open so we keep strict bid requirement
+    try:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
+            return False
+        t = now_et.time()
+        if t < dt_time(9, 30) or t >= dt_time(16, 0):
+            return False
+        return True
+    except Exception:
+        return True
+
+
 def _get_ma200(symbol: str) -> Optional[float]:
     try:
         ticker = yf.Ticker(symbol)
@@ -174,8 +195,9 @@ def _build_opportunities_for_symbol(
     overrides: Optional[Dict] = None,
     *,
     custom_symbols: bool = False,
+    market_open: bool = True,
 ) -> List[Dict]:
-    """Fetch option chain for DTE range expirations and build opportunity rows. No delta/IV/OI/MA200 filters."""
+    """Fetch option chain for DTE range expirations and build opportunity rows. When market is closed, allow options with no bid (use ask/last)."""
     # When user left a filter blank (not in overrides), use permissive default so we show results
     if overrides is not None:
         strike_pct_min = overrides["strike_pct_min"] if "strike_pct_min" in overrides else 0.50
@@ -227,11 +249,19 @@ def _build_opportunities_for_symbol(
 
             bid = _safe_float(row.get(bid_col), 0.0) or 0.0
             ask = _safe_float(row.get(ask_col), 0.0) or 0.0
+            # When market is closed, many options have no bid; allow ask/last so we still show results
             if not bid or bid <= 0:
-                continue  # no bid: skip; do not count toward max results
-            mid = (bid + ask) / 2 if (bid and ask) else (bid or _safe_float(row.get(last_col), 0.0) or 0.0)
-            if mid <= 0:
-                continue
+                if market_open:
+                    continue  # during market hours: require bid
+                # after hours: use ask or last for premium
+                mid = ask or _safe_float(row.get(last_col), 0.0) or 0.0
+                if mid <= 0:
+                    continue
+                bid = None  # leave bid empty in output
+            else:
+                mid = (bid + ask) / 2 if (bid and ask) else (bid or _safe_float(row.get(last_col), 0.0) or 0.0)
+                if mid <= 0:
+                    continue
             # Only apply bid-ask spread filter when both bid and ask exist; else allow (e.g. thin options)
             if bid and ask:
                 spread_pct = (ask - bid) / mid if mid else 1.0
@@ -336,6 +366,9 @@ def run_screener(
     target_upside_min = _ov(overrides, "target_upside_min", TARGET_UPSIDE_MIN)
 
     today = datetime.now()
+    market_open = _is_us_market_open()
+    if not market_open:
+        log.info("[CSP screener] US market closed; allowing options with no bid (using ask/last).")
     custom_symbols = symbols is not None and len(symbols or []) > 0  # user provided a list (e.g. "SLV")
     # Precedence: 1) custom symbols, 2) sector list when sector selected, 3) default universe.
     # Use full universe (no max_sym slice); we stop after max_sym symbols have *passed* basic filters and been options-scanned.
@@ -386,6 +419,7 @@ def run_screener(
             opportunities = _build_opportunities_for_symbol(
                 symbol, info, current_price, ma200, target_price, forward_pe, today, overrides,
                 custom_symbols=custom_symbols,
+                market_open=market_open,
             )
             if custom_symbols and len(opportunities) == 0:
                 log.warning(
@@ -434,4 +468,4 @@ def run_screener(
         o.pop("_downside_sort", None)
         o.pop("_pop_sort", None)
 
-    return all_opportunities[:max_res]
+    return {"opportunities": all_opportunities[:max_res], "market_open": market_open}

@@ -53,6 +53,7 @@ if [ "$BACKEND_TOO" = true ]; then
   echo "Syncing backend and data..."
   scp -i "$KEY_PATH" "$REPO_ROOT/backend/main.py" "$REPO_ROOT/backend/requirements.txt" \
     "$REPO_ROOT/backend/csp_universe.py" "$REPO_ROOT/backend/csp_screener.py" \
+    "$REPO_ROOT/backend/covered_calls_screener.py" \
     "${EC2_USER}@${EC2_IP}:${REMOTE_APP_DIR}/backend/"
   [ -d "$REPO_ROOT/data" ] && scp -i "$KEY_PATH" -r "$REPO_ROOT/data" "${EC2_USER}@${EC2_IP}:${REMOTE_APP_DIR}/"
   [ -f "$REPO_ROOT/DFWInvestors2026StockPicks.csv" ] && scp -i "$KEY_PATH" "$REPO_ROOT/DFWInvestors2026StockPicks.csv" "${EC2_USER}@${EC2_IP}:${REMOTE_APP_DIR}/"

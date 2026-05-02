@@ -816,15 +816,17 @@ async def get_csp_ideas(
         if max_symbols is not None: overrides["max_symbols"] = min(max_symbols, 10)
         if max_results is not None: overrides["max_results"] = min(max(max_results, 1), 100)
 
-        opportunities = run_screener(
+        result = run_screener(
             symbols=symbol_list,
             max_results=min(max(max_results or 50, 1), 100),
             overrides=overrides if overrides else None,
         )
+        opportunities = result.get("opportunities", result) if isinstance(result, dict) else result
         return {
             "opportunities": opportunities,
             "count": len(opportunities),
             "as_of": datetime.now(timezone.utc).isoformat(),
+            "market_open": result.get("market_open", True) if isinstance(result, dict) else True,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"CSP screener error: {str(e)}")

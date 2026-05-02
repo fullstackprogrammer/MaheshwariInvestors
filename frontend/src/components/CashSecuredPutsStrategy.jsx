@@ -54,6 +54,7 @@ function CashSecuredPutsStrategy() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [asOf, setAsOf] = useState(null);
+  const [marketOpen, setMarketOpen] = useState(true);
   const [sortConfig, setSortConfig] = useState({ key: 'annualized_return_pct', direction: 'desc' });
   const [filters, setFilters] = useState(DEFAULT_FILTER_STATE);
   const [customSymbols, setCustomSymbols] = useState('');
@@ -82,6 +83,7 @@ function CashSecuredPutsStrategy() {
         if (Array.isArray(data.opportunities)) {
           setOpportunities(data.opportunities);
           if (data.as_of != null) setAsOf(data.as_of);
+          if (data.market_open === false) setMarketOpen(false);
         }
       }
     } catch (_) {}
@@ -114,8 +116,9 @@ function CashSecuredPutsStrategy() {
       const asOfVal = data.as_of ?? null;
       setOpportunities(opps);
       setAsOf(asOfVal);
+      setMarketOpen(data.market_open !== false);
       try {
-        sessionStorage.setItem(CSP_STORAGE_KEY, JSON.stringify({ opportunities: opps, as_of: asOfVal }));
+        sessionStorage.setItem(CSP_STORAGE_KEY, JSON.stringify({ opportunities: opps, as_of: asOfVal, market_open: data.market_open }));
       } catch (_) {}
     } catch (err) {
       setOpportunities([]);
@@ -294,6 +297,12 @@ function CashSecuredPutsStrategy() {
         <p className="text-dark-muted text-xs">
           As of: {new Date(asOf).toLocaleString('en-US', { timeZone: 'America/Chicago' })} CST
         </p>
+      )}
+
+      {!marketOpen && opportunities.length > 0 && (
+        <div className="bg-amber-900/40 border border-amber-700 text-amber-200 px-4 py-2 rounded-lg text-sm">
+          US market is closed. Option bids may be missing; run again during market hours (9:30 AM–4 PM ET) for live quotes.
+        </div>
       )}
 
       {error && (

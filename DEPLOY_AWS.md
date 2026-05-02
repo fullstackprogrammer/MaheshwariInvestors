@@ -500,14 +500,28 @@ Then deploy the image to ECR and run it on ECS Fargate or AWS App Runner. The fr
 
 ## Quick reference (Option A)
 
-```bash
-# On EC2 after first-time setup
-cd /home/ec2-user/MaheshwariInvestors
-git pull   # or rsync from local
+**After `git pull` on EC2** (to install new changes: CSP, Covered Calls, frontend updates):
 
-cd backend && source venv/bin/activate && pip install -r requirements.txt
+```bash
+# 1. Go to repo
+cd /home/ec2-user/MaheshwariInvestors
+
+# 2. Backend: refresh deps (if requirements.txt changed) and restart API so new routes load
+cd backend
+source venv/bin/activate
+pip install -r requirements.txt
+cd ..
 sudo systemctl restart maheshwari-api
 
-cd ../frontend && npm ci && npm run build   # set VITE_API_BASE_URL if needed
-# Nginx already serves frontend/dist
+# 3. Frontend: rebuild so new JS is in dist/ (set your API URL if you use one)
+cd frontend
+npm ci
+export VITE_API_BASE_URL=http://YOUR_EC2_PUBLIC_IP:8000   # or your domain, or leave unset if using same-origin
+npm run build
+cd ..
+
+# 4. Nginx already serves frontend/dist; reload to pick up any config changes (optional)
+sudo systemctl reload nginx
 ```
+
+Replace `YOUR_EC2_PUBLIC_IP` with your instance’s public IP (e.g. the one you use for maheshai.com). If the site uses a domain and Nginx proxies `/api/` to the backend, you may use the same origin and omit `VITE_API_BASE_URL` (or set it to `https://yourdomain.com`).
