@@ -1,11 +1,14 @@
 import axios from 'axios';
 
-// Backend URL: .env wins; else on production use same origin /api (Nginx proxy); else localhost:8000
+// Backend URL: .env wins; else local/LAN (localhost or private IP) use same host on port 8000; else production /api
 function getApiBaseUrl() {
   if (import.meta.env.VITE_API_BASE_URL) return import.meta.env.VITE_API_BASE_URL;
-  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1')
-    return `${window.location.origin}/api`;
-  return 'http://localhost:8000';
+  if (typeof window === 'undefined') return 'http://localhost:8000';
+  const host = window.location.hostname;
+  const isLocal = host === 'localhost' || host === '127.0.0.1' ||
+    /^10\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^192\.168\./.test(host);
+  if (isLocal) return `http://${host}:8000`;
+  return `${window.location.origin}/api`;
 }
 const API_BASE_URL = getApiBaseUrl();
 const DEBUG = true; // set to false to reduce console logs

@@ -122,7 +122,11 @@ function CashSecuredPutsStrategy() {
       } catch (_) {}
     } catch (err) {
       setOpportunities([]);
-      setError(err?.response?.data?.detail || err?.message || 'Failed to load CSP ideas. Screener may take 1–2 minutes.');
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to load CSP ideas. Screener may take 1–2 minutes.';
+      const isNetworkError = !err?.response && (err?.message === 'Network Error' || err?.code === 'ERR_NETWORK');
+      setError(isNetworkError
+        ? 'Cannot reach the API. If you opened the app via an IP (e.g. 172.16.x.x), start the backend with: uvicorn main:app --reload --port 8000 --host 0.0.0.0 — or use http://localhost:5173'
+        : msg);
     } finally {
       setLoading(false);
     }
