@@ -1,13 +1,15 @@
 import axios from 'axios';
 
-// Backend URL: .env wins; else local/LAN (localhost or private IP) use same host on port 8000; else production /api
-function getApiBaseUrl() {
+// Backend URL: .env wins; else local/LAN (localhost or private IP) use same host on port 8080; else production /api
+export function getApiBaseUrl() {
   if (import.meta.env.VITE_API_BASE_URL) return import.meta.env.VITE_API_BASE_URL;
-  if (typeof window === 'undefined') return 'http://localhost:8000';
+  if (typeof window === 'undefined') return 'http://127.0.0.1:8080';
   const host = window.location.hostname;
   const isLocal = host === 'localhost' || host === '127.0.0.1' ||
     /^10\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^192\.168\./.test(host);
-  if (isLocal) return `http://${host}:8000`;
+  // Prefer IPv4 loopback: "localhost" can resolve to ::1 first; if only 127.0.0.1 is bound, requests stall.
+  if (isLocal && (host === 'localhost' || host === '127.0.0.1')) return 'http://127.0.0.1:8080';
+  if (isLocal) return `http://${host}:8080`;
   return `${window.location.origin}/api`;
 }
 const API_BASE_URL = getApiBaseUrl();
@@ -26,7 +28,7 @@ const api = axios.create({
 // Health check: 15s timeout to allow for cold start / slow backend
 export const checkHealth = async () => {
   debug('checkHealth →', API_BASE_URL + '/health');
-  const response = await axios.get(`${API_BASE_URL}/health`, { timeout: 15000 });
+  const response = await axios.get(`${API_BASE_URL}/health`, { timeout: 30000 });
   debug('checkHealth OK', response.data);
   return response.data;
 };

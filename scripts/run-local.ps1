@@ -54,10 +54,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Start backend in background
-Write-Host "Starting backend at http://localhost:8000 ..." -ForegroundColor Green
+Write-Host "Starting backend at http://localhost:8080 ..." -ForegroundColor Green
 $backendJob = Start-Job -ScriptBlock {
     Set-Location $using:BackendDir
-    & $using:VenvPython -m uvicorn main:app --reload --port 8000 --host 0.0.0.0
+    & $using:VenvPython -m uvicorn main:app --reload --port 8080 --host 0.0.0.0
 }
 
 # Wait for backend to be up
@@ -76,7 +76,7 @@ if (-not (Test-Path $nodeModules)) {
 Write-Host "Starting frontend at http://localhost:5173 ..." -ForegroundColor Green
 Write-Host ""
 Write-Host "Open in browser: http://localhost:5173" -ForegroundColor Cyan
-Write-Host "API docs: http://localhost:8000/docs" -ForegroundColor Cyan
+Write-Host "API docs: http://localhost:8080/docs" -ForegroundColor Cyan
 Write-Host "Press Ctrl+C to stop both servers." -ForegroundColor Gray
 Write-Host ""
 

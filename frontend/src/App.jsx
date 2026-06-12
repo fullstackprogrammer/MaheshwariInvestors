@@ -5,15 +5,8 @@ import StocksOverview from './components/StocksOverview';
 import CashSecuredPutsStrategy from './components/CashSecuredPutsStrategy';
 import CoveredCallsStrategy from './components/CoveredCallsStrategy';
 import Login from './components/Login';
-import { checkHealth, getMetrics, getInvestorRankings, getStocks } from './services/api';
+import { checkHealth, getMetrics, getInvestorRankings, getStocks, getApiBaseUrl } from './services/api';
 
-// Same logic as api.js for error messages
-function getApiBaseUrl() {
-  if (import.meta.env.VITE_API_BASE_URL) return import.meta.env.VITE_API_BASE_URL;
-  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1')
-    return `${window.location.origin}/api`;
-  return 'http://localhost:8000';
-}
 const API_BASE_URL = getApiBaseUrl();
 
 const DATA_RETRY_MS = 15000;
@@ -148,9 +141,11 @@ function App() {
           const url = API_BASE_URL;
           if (DEBUG) console.log('[App] init failed:', error?.message || error, error?.code);
           if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-            setApiError(`Backend did not respond in time. Is the server running on ${url}?`);
+            setApiError(
+              `Backend did not respond in time at ${url}. From the backend folder run: uvicorn main:app --reload --port 8080 --host 0.0.0.0 (or .\\run.bat). If you still use port 8000, set VITE_API_BASE_URL=http://127.0.0.1:8000 in frontend/.env.development.local and restart npm run dev.`
+            );
           } else if (error.request) {
-            setApiError(`Cannot connect to backend at ${url}. Start the server (e.g. cd backend && uvicorn main:app --reload --port 8000).`);
+            setApiError(`Cannot connect to backend at ${url}. Start the server (e.g. cd backend && uvicorn main:app --reload --port 8080).`);
           } else {
             setApiError(`Backend error. Ensure the server is running on ${url}`);
           }
@@ -175,7 +170,7 @@ function App() {
       <div className="min-h-screen bg-dark-bg flex flex-col items-center justify-center gap-4">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
         <p className="text-dark-muted">Connecting to backend at {API_BASE_URL}…</p>
-        <p className="text-sm text-dark-muted">If this hangs, check that the backend is running (uvicorn on port 8000).</p>
+        <p className="text-sm text-dark-muted">If this hangs, check that the backend is running (uvicorn on port 8080 for local dev).</p>
       </div>
     );
   }
