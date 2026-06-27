@@ -114,14 +114,20 @@ export const getCspFilters = async () => {
 export const getCspIdeas = async (params = {}) => {
   const requestParams = {
     max_results: params.max_results ?? 50,
+    min_dte: params.min_dte,
     max_dte: params.max_dte,
     sector: params.sector,
-    strike_pct_min: params.strike_pct_min,
-    strike_pct_max: params.strike_pct_max,
+    put_delta_min: params.put_delta_min,
+    put_delta_max: params.put_delta_max,
     max_bid_ask_pct: params.max_bid_ask_pct,
     target_upside_min: params.target_upside_min,
     min_annualized_return_pct: params.min_annualized_return_pct,
     min_market_cap_b: params.min_market_cap_b,
+    min_open_interest: params.min_open_interest,
+    min_option_volume: params.min_option_volume,
+    max_price_vs_ma200_pct: params.max_price_vs_ma200_pct,
+    min_iv_rank: params.min_iv_rank,
+    skip_earnings: params.skip_earnings,
     max_symbols: params.max_symbols,
   };
   if (params.symbols && String(params.symbols).trim()) {

@@ -11,7 +11,7 @@ const CSP_HEADER_TOOLTIPS = {
   bid: 'Highest price a buyer will pay for the option.',
   ask: 'Lowest price a seller will accept for the option.',
   mid: 'Average of bid and ask (often used as fair value).',
-  return_dollars: 'Premium you receive for selling one put contract (100 shares).',
+  return_dollars: 'Premium at bid (conservative) for selling one put contract (100 shares).',
   cash_required: 'Cash held to secure the put (strike × 100).',
   return_pct: 'Premium as a percentage of cash required (not annualized).',
   annualized_return_pct: 'Annualized premium return based on days until expiration.',
@@ -19,6 +19,11 @@ const CSP_HEADER_TOOLTIPS = {
   pct_downside_to_strike: 'How far the current stock price is above the put strike (downside cushion).',
   forward_pe: 'Forward price-to-earnings ratio.',
   analyst_target_price: 'Analyst average price target.',
+  composite_score: 'Risk-adjusted score: annualized return × probability of profit × liquidity, plus cushion bonus. Higher is better.',
+  delta: 'Put delta (negative for OTM puts). Measures sensitivity to stock price; used for POP. From chain or Black-Scholes.',
+  probability_of_profit_pct: 'Estimated chance the put expires worthless (you keep premium). From option delta or Black-Scholes.',
+  open_interest: 'Open contracts — higher means more liquid.',
+  iv_percentile: 'IV rank proxy: current implied vol vs 1-year range of historical volatility.',
 };
 
 const SECTOR_OPTIONS = [
@@ -38,13 +43,19 @@ const SECTOR_OPTIONS = [
 
 const DEFAULT_FILTER_STATE = {
   sector: '',
+  min_dte: 7,
   max_dte: 30,
-  strike_pct_min: 0.80,
-  strike_pct_max: 0.95,
+  put_delta_min: -0.30,
+  put_delta_max: -0.10,
   max_bid_ask_pct: 0.10,
   target_upside_min: 0.10,
   min_annualized_return_pct: 0.10,
   min_market_cap_b: 20,
+  min_open_interest: 100,
+  min_option_volume: 10,
+  max_price_vs_ma200_pct: 1.10,
+  min_iv_rank: 0,
+  skip_earnings: true,
   max_symbols: 10,
   max_results: 50,
 };
@@ -55,10 +66,9 @@ function CashSecuredPutsStrategy() {
   const [error, setError] = useState(null);
   const [asOf, setAsOf] = useState(null);
   const [marketOpen, setMarketOpen] = useState(true);
-  const [sortConfig, setSortConfig] = useState({ key: 'annualized_return_pct', direction: 'desc' });
+  const [sortConfig, setSortConfig] = useState({ key: 'composite_score', direction: 'desc' });
   const [filters, setFilters] = useState(DEFAULT_FILTER_STATE);
   const [customSymbols, setCustomSymbols] = useState('');
-  const [useCommunityStocks, setUseCommunityStocks] = useState(false);
   const [filtersLoaded, setFiltersLoaded] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(true);
 
@@ -93,19 +103,19 @@ function CashSecuredPutsStrategy() {
     setLoading(true);
     setError(null);
     const params = {};
-    const skipKeys = new Set(['min_dte', 'min_avg_volume_m', 'debt_to_equity_max']);
+    const skipKeys = new Set(['min_avg_volume_m', 'debt_to_equity_max']);
     Object.keys(filters).forEach((k) => {
       if (skipKeys.has(k)) return;
       const v = filters[k];
       if (k === 'sector') {
         if (v !== '' && v != null) params[k] = String(v);
+      } else if (k === 'skip_earnings') {
+        params[k] = Boolean(v);
       } else if (v !== '' && v != null) {
         params[k] = Number(v);
       }
     });
-    if (useCommunityStocks && !customSymbols.trim()) {
-      params.use_community_universe = true;
-    } else if (customSymbols.trim()) {
+    if (customSymbols.trim()) {
       params.symbols = customSymbols.trim();
     }
     if (params.max_symbols != null) params.max_symbols = Math.min(10, Math.max(1, Number(params.max_symbols)));
@@ -130,7 +140,7 @@ function CashSecuredPutsStrategy() {
     } finally {
       setLoading(false);
     }
-  }, [filters, customSymbols, useCommunityStocks]);
+  }, [filters, customSymbols]);
 
   const runScreener = () => {
     loadCspIdeas();
@@ -138,6 +148,10 @@ function CashSecuredPutsStrategy() {
 
   const updateFilter = (key, value) => {
     if (key === 'sector') {
+      setFilters((prev) => ({ ...prev, [key]: value }));
+      return;
+    }
+    if (key === 'skip_earnings') {
       setFilters((prev) => ({ ...prev, [key]: value }));
       return;
     }
@@ -171,6 +185,7 @@ function CashSecuredPutsStrategy() {
   });
 
   const formatNumber = (num) => (num == null ? '–' : Number(num).toLocaleString(undefined, { maximumFractionDigits: 2 }));
+  const formatDelta = (num) => (num == null ? '–' : Number(num).toFixed(3));
   const formatPercent = (num) => (num == null ? '–' : `${Number(num).toFixed(2)}%`);
   const formatCurrency = (num) => (num == null ? '–' : `$${Number(num).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
   const getSortIcon = (key) => (sortConfig.key !== key ? '↕' : sortConfig.direction === 'asc' ? '↑' : '↓');
@@ -214,34 +229,15 @@ function CashSecuredPutsStrategy() {
         Adjust filters below and click Run screener. Optionally enter stocks/ETFs (comma-separated) to scan only those; leave empty for the default universe. Takes 1–2 minutes.
       </p>
 
-      {/* Universe: Stocks/ETFs input with "Use MAI stocks" toggle on the right */}
-      <div className="flex flex-col gap-2">
-        <div className="flex items-start gap-8">
-          <div className="flex flex-col gap-1 min-w-0 max-w-2xl flex-1">
-            <label className="text-sm font-medium">Stocks / ETFs (comma-separated)</label>
-            <input
-              type="text"
-              value={customSymbols}
-              onChange={(e) => setCustomSymbols(e.target.value)}
-              placeholder="e.g. AAPL, MSFT, SPY — leave empty to use default or MAI universe"
-              className="w-full px-3 py-2 bg-dark-surface border border-dark-border rounded-lg text-white placeholder-dark-muted focus:border-blue-500 focus:outline-none"
-            />
-          </div>
-          <div className="flex items-center gap-2 shrink-0 pt-6">
-            <span className="text-sm font-medium whitespace-nowrap">Use MAI stocks</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={useCommunityStocks}
-              onClick={() => setUseCommunityStocks((v) => !v)}
-              className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border border-dark-border transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-dark-bg ${useCommunityStocks ? 'bg-blue-600' : 'bg-dark-border'}`}
-            >
-              <span
-                className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition translate-x-0.5 mt-0.5 ${useCommunityStocks ? 'translate-x-5' : 'translate-x-0'}`}
-              />
-            </button>
-          </div>
-        </div>
+      <div className="flex flex-col gap-1 min-w-0 max-w-2xl">
+        <label className="text-sm font-medium">Stocks / ETFs (comma-separated)</label>
+        <input
+          type="text"
+          value={customSymbols}
+          onChange={(e) => setCustomSymbols(e.target.value)}
+          placeholder="e.g. AAPL, MSFT, SPY — leave empty for default large-cap universe"
+          className="w-full px-3 py-2 bg-dark-surface border border-dark-border rounded-lg text-white placeholder-dark-muted focus:border-blue-500 focus:outline-none"
+        />
       </div>
 
       {/* Filters panel */}
@@ -268,15 +264,33 @@ function CashSecuredPutsStrategy() {
                 ))}
               </select>
             </div>
-            {filterInput('Max DTE', 'max_dte', 'Calendar days to expiration')}
-            {filterInput('Strike % min', 'strike_pct_min', 'e.g. 0.80 = 20% below spot', 'number', 0.01)}
-            {filterInput('Strike % max', 'strike_pct_max', 'e.g. 0.95 = 5% below spot', 'number', 0.01)}
+            {filterInput('Min DTE', 'min_dte', 'Min calendar days to expiration', 'number', 1)}
+            {filterInput('Max DTE', 'max_dte', 'Max calendar days to expiration')}
+            {filterInput('Put delta min', 'put_delta_min', 'e.g. -0.30 = up to 30Δ assignment risk', 'number', 0.01)}
+            {filterInput('Put delta max', 'put_delta_max', 'e.g. -0.10 = at least 10Δ (more OTM)', 'number', 0.01)}
             {filterInput('Max bid-ask %', 'max_bid_ask_pct', 'Of premium e.g. 0.10 = 10%', 'number', 0.01)}
             {filterInput('Min annualized return', 'min_annualized_return_pct', 'Decimal e.g. 0.10 = 10%', 'number', 0.01)}
             {filterInput('Target upside min', 'target_upside_min', 'e.g. 0.10 = 10%', 'number', 0.01)}
             {filterInput('Min market cap (B)', 'min_market_cap_b', '$B')}
+            {filterInput('Min open interest', 'min_open_interest', 'Contracts', 'number', 1)}
+            {filterInput('Min option volume', 'min_option_volume', 'Today\'s contracts', 'number', 1)}
+            {filterInput('Max price vs MA200', 'max_price_vs_ma200_pct', 'e.g. 1.10 = 10% above 200d MA', 'number', 0.01)}
+            {filterInput('Min IV rank', 'min_iv_rank', '0–100 proxy; 0 = off', 'number', 1)}
             {filterInput('Max symbols', 'max_symbols', 'Universe size to scan. Max 10.', 'number', 1)}
             {filterInput('Max results', 'max_results', 'Max 100.', 'number', 1)}
+            <div className="flex flex-col gap-0.5 justify-end">
+              <label className="text-xs text-dark-muted">Skip earnings window</label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={filters.skip_earnings !== false}
+                onClick={() => updateFilter('skip_earnings', !filters.skip_earnings)}
+                className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border border-dark-border transition-colors focus:outline-none ${filters.skip_earnings !== false ? 'bg-blue-600' : 'bg-dark-border'}`}
+              >
+                <span className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transition translate-x-0.5 mt-0.5 ${filters.skip_earnings !== false ? 'translate-x-5' : 'translate-x-0'}`} />
+              </button>
+              <span className="text-xs text-dark-muted">Exclude expirations that cross earnings</span>
+            </div>
             <div className="flex items-end gap-2">
               <button
                 type="button"
@@ -356,6 +370,18 @@ function CashSecuredPutsStrategy() {
               <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('annualized_return_pct')}>
                 Ann. Return % {getSortIcon('annualized_return_pct')} <Tooltip content={CSP_HEADER_TOOLTIPS.annualized_return_pct}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('composite_score')}>
+                Score {getSortIcon('composite_score')} <Tooltip content={CSP_HEADER_TOOLTIPS.composite_score}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              </th>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('delta')}>
+                Delta {getSortIcon('delta')} <Tooltip content={CSP_HEADER_TOOLTIPS.delta}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              </th>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('probability_of_profit_pct')}>
+                POP % {getSortIcon('probability_of_profit_pct')} <Tooltip content={CSP_HEADER_TOOLTIPS.probability_of_profit_pct}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              </th>
+              <th className="px-3 py-2 text-right cursor-pointer hover:bg-dark-border transition-colors" onClick={() => handleSort('open_interest')}>
+                OI {getSortIcon('open_interest')} <Tooltip content={CSP_HEADER_TOOLTIPS.open_interest}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
+              </th>
               <th className="px-3 py-2 text-right">
                 Breakeven (expiry) <Tooltip content={CSP_HEADER_TOOLTIPS.breakeven_at_expiry}><span className="ml-0.5 cursor-help inline-block" aria-hidden="true">ℹ️</span></Tooltip>
               </th>
@@ -394,6 +420,10 @@ function CashSecuredPutsStrategy() {
                 <td className="px-3 py-2 text-right text-dark-muted">{formatCurrency(opp.cash_required)}</td>
                 <td className="px-3 py-2 text-right">{formatPercent(opp.return_pct)}</td>
                 <td className="px-3 py-2 text-right font-semibold text-green-400">{formatPercent(opp.annualized_return_pct)}</td>
+                <td className="px-3 py-2 text-right font-semibold text-blue-400">{formatNumber(opp.composite_score)}</td>
+                <td className="px-3 py-2 text-right text-dark-muted">{formatDelta(opp.delta)}</td>
+                <td className="px-3 py-2 text-right">{formatPercent(opp.probability_of_profit_pct)}</td>
+                <td className="px-3 py-2 text-right text-dark-muted">{formatNumber(opp.open_interest)}</td>
                 <td className="px-3 py-2 text-right text-dark-muted">{formatCurrency(opp.breakeven_at_expiry)}</td>
                 <td className="px-3 py-2 text-right">{formatPercent(opp.pct_downside_to_strike)}</td>
                 <td className="px-3 py-2 text-right text-dark-muted">{formatNumber(opp.forward_pe)}</td>

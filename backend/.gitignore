@@ -11,3 +11,4 @@ ENV/
 *.sqlite
 .DS_Store
 _sp500_constituents.csv
+.csp_cache/

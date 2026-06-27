@@ -18,6 +18,8 @@ import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
+import response_cache
+
 # Logging: INFO only; cache refresh and errors
 logging.basicConfig(
     level=logging.INFO,
@@ -123,6 +125,12 @@ _cache_refresh_lock = threading.Lock()
 YFINANCE_FETCH_TIMEOUT_SEC = 30
 # Minimum symbols in new cache before we merge; below this we skip update to keep previous cache
 MIN_CACHE_SYMBOLS_TO_UPDATE = 1
+
+# Precomputed API response cache (rankings, stocks, metrics, index) — TTL matches stock refresh
+RESPONSE_CACHE_KEY_RANKINGS = "rankings"
+RESPONSE_CACHE_KEY_STOCKS = "stocks"
+RESPONSE_CACHE_KEY_METRICS = "metrics"
+RESPONSE_CACHE_KEY_INDEX = "index_performance"
 
 def load_investors_from_csv():
     """Load investors from CSV file and generate aliases."""
@@ -286,6 +294,15 @@ def get_all_symbols() -> List[str]:
     return sorted(symbols)
 
 
+def get_community_symbol_weights() -> Dict[str, float]:
+    """How many investors hold each symbol (used to prioritize CSP universe)."""
+    counts: Dict[str, float] = defaultdict(float)
+    for inv in investors_data:
+        for s in inv["stocks"]:
+            counts[normalize_symbol(s)] += 1.0
+    return dict(counts)
+
+
 # Benchmark indices (DJIA, S&P 500, Nasdaq Composite) - included in cache refresh so Dashboard reuses cache
 _BENCHMARK_SYMBOLS_FOR_CACHE = ["^DJI", "^SPX", "^IXIC"]
 
@@ -345,6 +362,9 @@ def _refresh_cache_background_impl():
     log.info("[Cache refresh] Done in %.1fs: fetched %s, failed %s, cache size %s", elapsed, fetched, len(failed_list), cache_size)
     if fetched == 0 and cache_size == 0:
         log.warning("[Cache refresh] No data fetched and cache empty; app may return 503 until next refresh.")
+    else:
+        response_cache.invalidate_all()
+        _prewarm_response_cache()
 
 
 def _background_refresh_loop():
@@ -520,6 +540,7 @@ async def health():
         "investors_loaded": len(investors_data),
         "cache_ready": cache_ready,
         "cache_symbols": len(stock_cache),
+        "response_cache_entries": response_cache.stats()["entries"],
     }
 
 @app.get("/investors")
@@ -537,50 +558,46 @@ def _ensure_cache_ready():
         )
 
 
-@app.get("/investors/rankings")
-async def get_investor_rankings():
-    """Get investor rankings with performance metrics. Uses main-app cache only (no on-demand fetch)."""
+def _cached_response(key: str, builder):
+    """Return precomputed response or build, store, and return (TTL = stock refresh interval)."""
+    hit = response_cache.get(key, CACHE_REFRESH_INTERVAL_SEC)
+    if hit is not None:
+        return hit
     t0 = time.perf_counter()
-    _ensure_cache_ready()
+    result = builder()
+    response_cache.set(key, result, CACHE_REFRESH_INTERVAL_SEC)
+    log.info("[Response cache] MISS %s built in %.2fs", key, time.perf_counter() - t0)
+    return result
+
+
+def _build_rankings() -> List[Dict]:
     rankings = []
     for investor in investors_data:
         metrics = calculate_portfolio_metrics(investor, cache_only=True)
         rankings.append({
             "alias": investor["alias"],
             "stocks": investor["stocks"],
-            **metrics
+            **metrics,
         })
-    loop_elapsed = time.perf_counter() - t0
-    log.info("[Rankings] loop %.2fs for %d investors", loop_elapsed, len(investors_data))
-    # Sort by YTD return (descending)
     rankings.sort(key=lambda x: x["ytd"], reverse=True)
     for idx, ranking in enumerate(rankings, 1):
         ranking["rank"] = idx
-    total_elapsed = time.perf_counter() - t0
-    log.info("[Rankings] total %.2fs, %d rows (cache_symbols=%d)", total_elapsed, len(rankings), len(stock_cache))
     return rankings
 
-@app.get("/stocks")
-async def get_stocks():
-    """Get all unique stocks across all investors with metrics."""
-    _ensure_cache_ready()
-    # Collect all unique stocks
+
+def _build_stocks() -> List[Dict]:
     all_stocks = set()
     stock_to_investors = defaultdict(list)
-    
     for investor in investors_data:
         for symbol in investor["stocks"]:
             all_stocks.add(symbol)
             stock_to_investors[symbol].append(investor["alias"])
-    
+
     stocks_data = []
-    
     for symbol in sorted(all_stocks):
         stock_data = fetch_stock_data(symbol, cache_only=True)
         if stock_data:
             returns = calculate_returns(stock_data["prices"], stock_data["dates"])
-            
-            # Calculate total value held by all investors
             total_value = 0.0
             for investor in investors_data:
                 if symbol in investor["stocks"]:
@@ -590,7 +607,6 @@ async def get_stocks():
                         start_price = stock_data["prices"][0]
                         shares = allocation / start_price if start_price > 0 else 0
                         total_value += shares * stock_data["current_price"]
-            
             stocks_data.append({
                 "symbol": symbol,
                 "company_name": stock_data["company_name"],
@@ -606,38 +622,22 @@ async def get_stocks():
                 "forward_pe": stock_data["forward_pe"],
                 "investors_holding": len(stock_to_investors[symbol]),
                 "total_value": round(total_value, 2),
-                "value_pct": round((total_value / (len(investors_data) * INITIAL_PORTFOLIO_VALUE)) * 100, 2) if investors_data else 0.0
+                "value_pct": round((total_value / (len(investors_data) * INITIAL_PORTFOLIO_VALUE)) * 100, 2) if investors_data else 0.0,
             })
-    
-    log.info("Served /stocks (%d symbols)", len(stocks_data))
     return stocks_data
 
-@app.get("/metrics")
-async def get_metrics():
-    """Get aggregated metrics. Returns 503 while cache is warming so frontend can retry instead of blocking."""
-    _ensure_cache_ready()
-    rankings = await get_investor_rankings()
-    stocks = await get_stocks()
-    
-    # Top 5 investors by YTD
+
+def _build_metrics() -> Dict:
+    rankings = _cached_response(RESPONSE_CACHE_KEY_RANKINGS, _build_rankings)
+    stocks = _cached_response(RESPONSE_CACHE_KEY_STOCKS, _build_stocks)
     top_investors = rankings[:5]
-    
-    # Top 5 stocks by YTD
     stocks_sorted = sorted(stocks, key=lambda x: x["ytd"], reverse=True)
     top_stocks = stocks_sorted[:5]
-    
-    # Aggregated YTD return across all investors (average)
-    aggregate_ytd = (
-        sum(r["ytd"] for r in rankings) / len(rankings)
-        if rankings else 0.0
-    )
-    # Average portfolio value across ALL investors (consistent with aggregate_ytd; each starts at INITIAL_PORTFOLIO_VALUE)
+    aggregate_ytd = sum(r["ytd"] for r in rankings) / len(rankings) if rankings else 0.0
     average_portfolio_value = (
         sum(r["portfolio_value"] for r in rankings) / len(rankings)
         if rankings else float(INITIAL_PORTFOLIO_VALUE)
     )
-    
-    log.info("Served /metrics")
     return {
         "top_investors": top_investors,
         "top_stocks": top_stocks,
@@ -645,14 +645,116 @@ async def get_metrics():
         "total_stocks": len(stocks),
         "average_portfolio_value": round(average_portfolio_value, 2),
         "aggregate_ytd_return": round(aggregate_ytd, 2),
-        "last_updated": datetime.now(timezone.utc).isoformat()
+        "last_updated": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _build_index_performance() -> Dict:
+    start_date = "2026-01-01"
+    symbols = get_all_symbols()
+    mai_start = 0.0
+    mai_current = 0.0
+    for symbol in symbols:
+        data = fetch_stock_data(symbol, cache_only=True)
+        if data and data.get("prices") and data.get("dates"):
+            start_p = _get_price_on_date(data, start_date)
+            if start_p is not None:
+                mai_start += start_p
+                mai_current += float(data["current_price"])
+
+    rows = []
+    mai_gain_pct = 0.0
+    if mai_start and mai_start > 0:
+        mai_gain = mai_current - mai_start
+        mai_gain_pct = (mai_gain / mai_start) * 100
+        rows.append({
+            "index": "MAI",
+            "index_label": "Maheshwari AI Index",
+            "price_start": round(mai_start, 2),
+            "price_current": round(mai_current, 2),
+            "gain_loss_dollars": round(mai_gain, 2),
+            "gain_loss_pct": round(mai_gain_pct, 2),
+            "mai_vs_other_pct": None,
+        })
+
+    for sym in BENCHMARK_SYMBOLS:
+        data = _fetch_benchmark(sym, cache_only=True)
+        if not data or not data.get("prices") or not data.get("dates"):
+            continue
+        start_p = _get_price_on_date(data, start_date)
+        if start_p is None:
+            continue
+        current_p = float(data["current_price"])
+        gain = current_p - start_p
+        gain_pct = (gain / start_p) * 100
+        if gain_pct == 0:
+            mai_vs = None
+        else:
+            raw_pct = ((mai_gain_pct / gain_pct) - 1) * 100
+            sign = 1 if (mai_gain_pct - gain_pct) >= 0 else -1
+            mai_vs = sign * abs(raw_pct)
+        label = {"^DJI": "DJIA", "^SPX": "S&P 500", "^IXIC": "NASDAQ"}.get(sym, sym)
+        rows.append({
+            "index": label,
+            "index_label": label,
+            "price_start": round(start_p, 2),
+            "price_current": round(current_p, 2),
+            "gain_loss_dollars": round(gain, 2),
+            "gain_loss_pct": round(gain_pct, 2),
+            "mai_vs_other_pct": round(mai_vs, 1) if mai_vs is not None else None,
+        })
+
+    return {
+        "rows": rows,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _prewarm_response_cache():
+    """Rebuild API response cache after stock data refresh so requests are instant."""
+    if len(stock_cache) == 0:
+        return
+    t0 = time.perf_counter()
+    _cached_response(RESPONSE_CACHE_KEY_RANKINGS, _build_rankings)
+    _cached_response(RESPONSE_CACHE_KEY_STOCKS, _build_stocks)
+    _cached_response(RESPONSE_CACHE_KEY_METRICS, _build_metrics)
+    _cached_response(RESPONSE_CACHE_KEY_INDEX, _build_index_performance)
+    log.info("[Response cache] Prewarmed %d entries in %.2fs", response_cache.stats()["entries"], time.perf_counter() - t0)
+
+
+@app.get("/investors/rankings")
+async def get_investor_rankings():
+    """Get investor rankings with performance metrics. Uses main-app cache only (no on-demand fetch)."""
+    t0 = time.perf_counter()
+    _ensure_cache_ready()
+    rankings = _cached_response(RESPONSE_CACHE_KEY_RANKINGS, _build_rankings)
+    log.info("[Rankings] served in %.3fs (%d rows, cache_symbols=%d)", time.perf_counter() - t0, len(rankings), len(stock_cache))
+    return rankings
+
+
+@app.get("/stocks")
+async def get_stocks():
+    """Get all unique stocks across all investors with metrics."""
+    _ensure_cache_ready()
+    stocks_data = _cached_response(RESPONSE_CACHE_KEY_STOCKS, _build_stocks)
+    log.info("Served /stocks (%d symbols)", len(stocks_data))
+    return stocks_data
+
+
+@app.get("/metrics")
+async def get_metrics():
+    """Get aggregated metrics. Returns 503 while cache is warming so frontend can retry instead of blocking."""
+    _ensure_cache_ready()
+    metrics = _cached_response(RESPONSE_CACHE_KEY_METRICS, _build_metrics)
+    log.info("Served /metrics")
+    return metrics
 
 @app.post("/refresh-data")
 async def refresh_data():
     """Clear cache and refresh stock data."""
     global stock_cache
     stock_cache.clear()
+    response_cache.invalidate_all()
     return {"message": "Cache cleared. Data will be refreshed on next request."}
 
 
@@ -694,71 +796,9 @@ async def get_index_performance():
     Returns: price on 1/1/2026, current price, gain/loss $, gain/loss %, MAI vs other (% diff, sign = MAI better + / worse -).
     """
     _ensure_cache_ready()
-    start_date = "2026-01-01"
-    symbols = get_all_symbols()
-
-    # MAI: sum of prices across unique stocks (only stocks with valid start price)
-    mai_start = 0.0
-    mai_current = 0.0
-    for symbol in symbols:
-        data = fetch_stock_data(symbol, cache_only=True)
-        if data and data.get("prices") and data.get("dates"):
-            start_p = _get_price_on_date(data, start_date)
-            if start_p is not None:
-                mai_start += start_p
-                mai_current += float(data["current_price"])
-
-    # Benchmarks
-    rows = []
-    mai_gain_pct = 0.0
-    if mai_start and mai_start > 0:
-        mai_gain = mai_current - mai_start
-        mai_gain_pct = (mai_gain / mai_start) * 100
-        rows.append({
-            "index": "MAI",
-            "index_label": "Maheshwari AI Index",
-            "price_start": round(mai_start, 2),
-            "price_current": round(mai_current, 2),
-            "gain_loss_dollars": round(mai_gain, 2),
-            "gain_loss_pct": round(mai_gain_pct, 2),
-            "mai_vs_other_pct": None,
-        })
-
-    # Benchmarks: try cache first; fetch on miss so DJIA/S&P 500/NASDAQ always show (cache may not have them yet)
-    for sym in BENCHMARK_SYMBOLS:
-        data = _fetch_benchmark(sym, cache_only=True)
-        if not data or not data.get("prices") or not data.get("dates"):
-            continue
-        start_p = _get_price_on_date(data, start_date)
-        if start_p is None:
-            continue
-        current_p = float(data["current_price"])
-        gain = current_p - start_p
-        gain_pct = (gain / start_p) * 100
-        # MAI vs other: % difference with correct sign.
-        # Magnitude = relative % ((MAI/benchmark) - 1) * 100; sign = outperformance (MAI better -> +).
-        if gain_pct == 0:
-            mai_vs = None
-        else:
-            raw_pct = ((mai_gain_pct / gain_pct) - 1) * 100
-            sign = 1 if (mai_gain_pct - gain_pct) >= 0 else -1
-            mai_vs = sign * abs(raw_pct)
-        label = {"^DJI": "DJIA", "^SPX": "S&P 500", "^IXIC": "NASDAQ"}.get(sym, sym)
-        rows.append({
-            "index": label,
-            "index_label": label,
-            "price_start": round(start_p, 2),
-            "price_current": round(current_p, 2),
-            "gain_loss_dollars": round(gain, 2),
-            "gain_loss_pct": round(gain_pct, 2),
-            "mai_vs_other_pct": round(mai_vs, 1) if mai_vs is not None else None,
-        })
-
-    log.info("Served /index-performance (%d rows)", len(rows))
-    return {
-        "rows": rows,
-        "as_of": datetime.now(timezone.utc).isoformat(),
-    }
+    result = _cached_response(RESPONSE_CACHE_KEY_INDEX, _build_index_performance)
+    log.info("Served /index-performance (%d rows)", len(result.get("rows", [])))
+    return result
 
 
 # --- CSP (Cash-Secured Puts) Strategy: separate from main-app cache ---
@@ -781,14 +821,22 @@ async def get_csp_ideas(
     max_results: int = 50,
     symbols: Optional[str] = None,
     use_community_universe: Optional[bool] = None,
+    min_dte: Optional[int] = None,
     max_dte: Optional[int] = None,
     sector: Optional[str] = None,
+    put_delta_min: Optional[float] = None,
+    put_delta_max: Optional[float] = None,
     strike_pct_min: Optional[float] = None,
     strike_pct_max: Optional[float] = None,
     max_bid_ask_pct: Optional[float] = None,
     min_annualized_return_pct: Optional[float] = None,
     target_upside_min: Optional[float] = None,
     min_market_cap_b: Optional[float] = None,
+    min_open_interest: Optional[int] = None,
+    min_option_volume: Optional[int] = None,
+    max_price_vs_ma200_pct: Optional[float] = None,
+    min_iv_rank: Optional[float] = None,
+    skip_earnings: Optional[bool] = None,
     max_symbols: Optional[int] = None,
 ):
     """
@@ -805,21 +853,34 @@ async def get_csp_ideas(
         elif use_community_universe in (True, "true", "1", 1):
             symbol_list = get_all_symbols()
         overrides = {}
+        if min_dte is not None: overrides["min_dte"] = min_dte
         if max_dte is not None: overrides["max_dte"] = max_dte
         if sector and sector.strip(): overrides["sector"] = sector.strip()
+        if put_delta_min is not None: overrides["put_delta_min"] = put_delta_min
+        if put_delta_max is not None: overrides["put_delta_max"] = put_delta_max
         if strike_pct_min is not None: overrides["strike_pct_min"] = strike_pct_min
         if strike_pct_max is not None: overrides["strike_pct_max"] = strike_pct_max
         if max_bid_ask_pct is not None: overrides["max_bid_ask_pct"] = max_bid_ask_pct
         if min_annualized_return_pct is not None: overrides["min_annualized_return_pct"] = min_annualized_return_pct
         if target_upside_min is not None: overrides["target_upside_min"] = target_upside_min
         if min_market_cap_b is not None: overrides["min_market_cap_b"] = min_market_cap_b
+        if min_open_interest is not None: overrides["min_open_interest"] = min_open_interest
+        if min_option_volume is not None: overrides["min_option_volume"] = min_option_volume
+        if max_price_vs_ma200_pct is not None: overrides["max_price_vs_ma200_pct"] = max_price_vs_ma200_pct
+        if min_iv_rank is not None: overrides["min_iv_rank"] = min_iv_rank
+        if skip_earnings is not None: overrides["skip_earnings"] = skip_earnings
         if max_symbols is not None: overrides["max_symbols"] = min(max_symbols, 10)
         if max_results is not None: overrides["max_results"] = min(max(max_results, 1), 100)
+
+        with _cache_refresh_lock:
+            stock_snapshot = dict(stock_cache) if stock_cache else None
 
         result = run_screener(
             symbols=symbol_list,
             max_results=min(max(max_results or 50, 1), 100),
             overrides=overrides if overrides else None,
+            community_weights=get_community_symbol_weights(),
+            stock_cache_snapshot=stock_snapshot,
         )
         opportunities = result.get("opportunities", result) if isinstance(result, dict) else result
         return {
