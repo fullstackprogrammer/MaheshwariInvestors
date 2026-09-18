@@ -45,8 +45,8 @@ function pnlClass(v) {
  */
 function CspAlerts({ userId }) {
   const [settings, setSettings] = useState(null);
-  const [phone, setPhone] = useState('');
-  const [smsEnabled, setSmsEnabled] = useState(true);
+  const [email, setEmail] = useState('');
+  const [emailEnabled, setEmailEnabled] = useState(true);
   const [watchlistText, setWatchlistText] = useState('');
   const [criteria, setCriteria] = useState({});
   const [ideas, setIdeas] = useState([]);
@@ -72,8 +72,8 @@ function CspAlerts({ userId }) {
         }),
       ]);
       setSettings(s);
-      setPhone(s.phone || '');
-      setSmsEnabled(!!s.sms_enabled);
+      setEmail(s.email || '');
+      setEmailEnabled(!!s.email_enabled);
       setWatchlistText((s.watchlist || []).join(', '));
       setCriteria(s.criteria || {});
       setIdeas(ledger.ideas || []);
@@ -94,8 +94,8 @@ function CspAlerts({ userId }) {
   const persistSettings = async () => {
     const watchlist = watchlistText.split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean);
     const saved = await updateCspAlertSettings(userId, {
-      phone,
-      sms_enabled: smsEnabled,
+      email,
+      email_enabled: emailEnabled,
       watchlist,
       criteria: {
         ...criteria,
@@ -103,7 +103,8 @@ function CspAlerts({ userId }) {
       },
     });
     setSettings(saved);
-    setPhone(saved.phone || '');
+    setEmail(saved.email || '');
+    setEmailEnabled(!!saved.email_enabled);
     setWatchlistText((saved.watchlist || []).join(', '));
     setCriteria(saved.criteria || {});
     return saved;
@@ -123,17 +124,17 @@ function CspAlerts({ userId }) {
     }
   };
 
-  const handleRun = async (withSms) => {
+  const handleRun = async (withEmail) => {
     setRunning(true);
     setMessage(null);
     setError(null);
     try {
       await persistSettings();
-      const result = await runCspAlertScan(userId, { send_sms: withSms });
+      const result = await runCspAlertScan(userId, { send_email: withEmail });
       setMessage(
         result.error
           ? `Run finished with error: ${result.error}`
-          : `Scan done — found ${result.opportunities_found}, new ideas ${result.ideas_inserted}, SMS ${result.sms_sent ? 'sent' : 'not sent'}.`
+          : `Scan done — found ${result.opportunities_found}, new ideas ${result.ideas_inserted}, email ${result.email_sent ? 'sent' : 'not sent'}.`
       );
       await loadAll({ refreshMarks: true });
     } catch (e) {
@@ -172,7 +173,7 @@ function CspAlerts({ userId }) {
         <h2 className="text-2xl font-semibold text-white mb-1">CSP Alerts</h2>
         <p className="text-dark-muted text-sm max-w-3xl">
           Weekday 12:30 PM CT scan of your watchlist. Top ideas are saved as paper trades with live P/L until expiry,
-          then settled from the stock close. SMS includes zero-result days when enabled.
+          then settled from the stock close. Email includes zero-result days when enabled.
         </p>
       </div>
 
@@ -189,12 +190,12 @@ function CspAlerts({ userId }) {
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm text-dark-muted mb-1">Phone (US 10-digit)</label>
+            <label className="block text-sm text-dark-muted mb-1">Alert email</label>
             <input
-              type="tel"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="7325551234"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
               className="w-full px-3 py-2 rounded-lg bg-dark-bg border border-dark-border text-white"
             />
           </div>
@@ -202,11 +203,11 @@ function CspAlerts({ userId }) {
             <label className="inline-flex items-center gap-2 text-sm text-white cursor-pointer">
               <input
                 type="checkbox"
-                checked={smsEnabled}
-                onChange={(e) => setSmsEnabled(e.target.checked)}
+                checked={emailEnabled}
+                onChange={(e) => setEmailEnabled(e.target.checked)}
                 className="rounded border-dark-border"
               />
-              Send SMS at 12:30 CT (weekdays)
+              Send email at 12:30 CT (weekdays)
             </label>
           </div>
         </div>
@@ -265,7 +266,7 @@ function CspAlerts({ userId }) {
             disabled={running || saving}
             className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm hover:bg-emerald-600 disabled:opacity-50"
           >
-            {running ? 'Scanning… (1–3 min)' : 'Run scan now + SMS'}
+            {running ? 'Scanning… (1–3 min)' : 'Run scan now + email'}
           </button>
           <button
             type="button"
@@ -273,7 +274,7 @@ function CspAlerts({ userId }) {
             disabled={running || saving}
             className="px-4 py-2 rounded-lg bg-dark-bg border border-dark-border text-white text-sm hover:bg-dark-border disabled:opacity-50"
           >
-            Run scan (no SMS)
+            Run scan (no email)
           </button>
           <button
             type="button"
@@ -291,7 +292,7 @@ function CspAlerts({ userId }) {
         {latestRun && (
           <p className="text-xs text-dark-muted">
             Last run: {new Date(latestRun.ran_at).toLocaleString()} · found {latestRun.opportunities_found} ·
-            inserted {latestRun.ideas_inserted} · SMS {latestRun.sms_sent ? 'yes' : 'no'}
+            inserted {latestRun.ideas_inserted} · email {latestRun.sms_sent ? 'yes' : 'no'}
             {latestRun.error ? ` · error: ${latestRun.error}` : ''}
           </p>
         )}

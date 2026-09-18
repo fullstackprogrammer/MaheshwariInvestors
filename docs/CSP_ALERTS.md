@@ -1,74 +1,80 @@
-# CSP Alerts (SMS + paper P&L ledger)
+# CSP Alerts (email + paper P&L ledger)
 
-Weekday scanner for a personal watchlist. Saves top opportunities, texts results (including zero hits), and tracks paper P/L until / after expiry.
+Weekday scanner for a personal watchlist. Saves top opportunities, emails results (including zero hits), and tracks paper P/L until / after expiry.
 
 ## What it does
 
-1. **Settings UI** (feature-gated; currently `nileshrb` only): phone, SMS on/off, ticker watchlist, scanner criteria.
-2. **12:30 PM America/Chicago, Mon–Fri**: scan → store top N (default 3, one per ticker) → SMS → refresh open marks / settle expired.
+1. **Settings UI** (feature-gated; currently `nileshrb` only): email, email on/off, ticker watchlist, scanner criteria.
+2. **12:30 PM America/Chicago, Mon–Fri**: scan → store top N (default 3, one per ticker) → email → refresh open marks / settle expired.
 3. **P&L table**: live unrealized = `(entry_premium − current put mid) × 100`; settled from underlying close vs strike at expiry.
 
 Data lives in SQLite: `backend/data/csp_alerts.db` (gitignored via `*.db`).
 
-## EC2 setup
+## Email via SMTP (recommended)
 
-### 1. Dependencies
+No AWS SNS / toll-free number needed. Use Gmail (app password), Outlook, or Amazon SES SMTP.
 
-```bash
-cd /home/ec2-user/MaheshwariInvestors/backend
-source venv/bin/activate
-pip install -r requirements.txt   # includes boto3
-```
+### 1. Create a Gmail app password (example)
 
-### 2. AWS SNS for SMS
+1. Google Account → Security → 2-Step Verification (on)
+2. App passwords → generate one for “Mail”
+3. Use that 16-char password (not your normal Gmail password)
 
-Option A — **direct SMS** (simplest): ensure the EC2 instance role (or `~/.aws` credentials) can `sns:Publish` to phone numbers. No topic needed.
-
-Option B — **topic** (same pattern as backend-down alerts):
+### 2. Set env on EC2 (API + cron)
 
 ```bash
-# create topic + SMS subscription once, then:
-export CSP_ALERTS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:ACCOUNT:csp-alerts
+sudo systemctl edit maheshwari-api
 ```
-
-Persist env for the API and cron, e.g. in the systemd unit:
 
 ```ini
-Environment="CSP_ALERTS_SNS_TOPIC_ARN=arn:aws:sns:..."
+[Service]
+Environment="CSP_ALERTS_SMTP_HOST=smtp.gmail.com"
+Environment="CSP_ALERTS_SMTP_PORT=587"
+Environment="CSP_ALERTS_SMTP_USER=youraddress@gmail.com"
+Environment="CSP_ALERTS_SMTP_PASSWORD=xxxx xxxx xxxx xxxx"
+Environment="CSP_ALERTS_FROM_EMAIL=youraddress@gmail.com"
 Environment="CSP_ALERTS_SITE_URL=https://maheshai.com"
 ```
 
-Then `sudo systemctl daemon-reload && sudo systemctl restart maheshwari-api`.
-
-### 3. Cron (weekdays 12:30 CT)
-
 ```bash
-sudo crontab -u ec2-user -e
+sudo systemctl daemon-reload
+sudo systemctl restart maheshwari-api
 ```
 
-Add:
+Remove any old `CSP_ALERTS_SNS_TOPIC_ARN` line — it is unused now.
+
+### 3. Cron (include the same SMTP env)
 
 ```cron
 CRON_TZ=America/Chicago
-30 12 * * 1-5  cd /home/ec2-user/MaheshwariInvestors/backend && ./venv/bin/python scripts/csp_daily_alert.py >> /home/ec2-user/csp_alerts.log 2>&1
+30 12 * * 1-5  cd /home/ec2-user/MaheshwariInvestors/backend && CSP_ALERTS_SMTP_HOST=smtp.gmail.com CSP_ALERTS_SMTP_PORT=587 CSP_ALERTS_SMTP_USER=youraddress@gmail.com CSP_ALERTS_SMTP_PASSWORD='your-app-password' CSP_ALERTS_FROM_EMAIL=youraddress@gmail.com CSP_ALERTS_SITE_URL=https://maheshai.com ./venv/bin/python scripts/csp_daily_alert.py >> /home/ec2-user/csp_alerts.log 2>&1
 ```
 
-Optional EOD mark/settle (e.g. 4:15 PM CT):
+Or use a wrapper script that `export`s those vars (cleaner than putting the password in crontab).
+
+Optional EOD mark/settle:
 
 ```cron
 15 16 * * 1-5  cd /home/ec2-user/MaheshwariInvestors/backend && ./venv/bin/python scripts/csp_daily_alert.py --mark-only >> /home/ec2-user/csp_alerts.log 2>&1
 ```
 
-### 4. Manual test
+### 4. UI
+
+1. Log in as **nileshrb** → **CSP Alerts**
+2. Enter your alert email → enable send → Save
+3. **Run scan (no email)** then **Run scan now + email**
+
+### 5. Manual CLI test
 
 ```bash
 cd /home/ec2-user/MaheshwariInvestors/backend
 source venv/bin/activate
-# Save phone via UI first, or:
-python -c "import csp_alerts_db as d; d.init_db(); d.ensure_user_settings('nileshrb'); d.update_user_settings('nileshrb', phone='7324216751')"
+export CSP_ALERTS_SMTP_HOST=smtp.gmail.com
+export CSP_ALERTS_SMTP_PORT=587
+export CSP_ALERTS_SMTP_USER=youraddress@gmail.com
+export CSP_ALERTS_SMTP_PASSWORD='your-app-password'
+export CSP_ALERTS_FROM_EMAIL=youraddress@gmail.com
 python scripts/csp_daily_alert.py --user nileshrb
-# Dry run without SMS:
-python scripts/csp_daily_alert.py --user nileshrb --no-sms
 ```
 
 ## Opening the feature to more users later
@@ -76,17 +82,17 @@ python scripts/csp_daily_alert.py --user nileshrb --no-sms
 In `csp_alerts_service.py`:
 
 ```python
-FEATURE_USERS = {"nileshrb", "mai108"}  # add ids
+FEATURE_USERS = {"nileshrb", "mai108"}
 DEFAULT_ALERT_USERS = ["nileshrb", "mai108"]
 ```
 
-Each user has their own settings row and ideas. Frontend gate is `userId` ∈ feature set (same list conceptually).
+And add the matching user id to `CSP_ALERTS_USERS` in `frontend/src/App.jsx`.
 
 ## API
 
 | Method | Path | Notes |
 |--------|------|--------|
 | GET | `/csp-alerts/settings?user_id=` | |
-| PUT | `/csp-alerts/settings?user_id=` | body: phone, sms_enabled, watchlist, criteria |
+| PUT | `/csp-alerts/settings?user_id=` | body: email, email_enabled, watchlist, criteria |
 | GET | `/csp-alerts/ideas?user_id=&refresh=1` | ledger + summary |
-| POST | `/csp-alerts/run?user_id=&send_sms=true` | manual scan (slow) |
+| POST | `/csp-alerts/run?user_id=&send_email=true` | manual scan (slow) |

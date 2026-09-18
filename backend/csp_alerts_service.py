@@ -1,5 +1,5 @@
 """
-CSP Alerts business logic: scan → persist top N → SMS → mark/settle P&L.
+CSP Alerts business logic: scan → persist top N → email → mark/settle P&L.
 
 Feature access is gated by FEATURE_USERS (currently nileshrb only).
 Settings/ideas are keyed by user_id so more users can be enabled later.
@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import re
+import smtplib
 from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional, Tuple
 
 import yfinance as yf
@@ -26,9 +29,15 @@ FEATURE_USERS = {"nileshrb"}
 # Cron should process these users even if they have not opened the UI yet.
 DEFAULT_ALERT_USERS = ["nileshrb"]
 
-SNS_TOPIC_ARN_ENV = "CSP_ALERTS_SNS_TOPIC_ARN"
 SITE_URL_ENV = "CSP_ALERTS_SITE_URL"
 DEFAULT_SITE_URL = "https://maheshai.com"
+
+# SMTP (Gmail app password, SES SMTP, etc.)
+SMTP_HOST_ENV = "CSP_ALERTS_SMTP_HOST"
+SMTP_PORT_ENV = "CSP_ALERTS_SMTP_PORT"
+SMTP_USER_ENV = "CSP_ALERTS_SMTP_USER"
+SMTP_PASSWORD_ENV = "CSP_ALERTS_SMTP_PASSWORD"
+SMTP_FROM_ENV = "CSP_ALERTS_FROM_EMAIL"
 
 
 def user_has_feature(user_id: str) -> bool:
@@ -51,28 +60,32 @@ def get_settings(user_id: str) -> Dict[str, Any]:
 
 def save_settings(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     uid = require_feature_user(user_id)
-    phone = payload.get("phone")
-    if phone is not None:
-        phone = _normalize_phone(str(phone))
+    email = payload.get("email")
+    if email is not None:
+        email = _normalize_email(str(email))
+    # Accept legacy keys from older UI
+    email_enabled = payload.get("email_enabled")
+    if email_enabled is None and "sms_enabled" in payload:
+        email_enabled = payload.get("sms_enabled")
     watchlist = payload.get("watchlist")
     if isinstance(watchlist, str):
         watchlist = [p.strip() for p in re.split(r"[\s,;]+", watchlist) if p.strip()]
     return db.update_user_settings(
         uid,
-        phone=phone,
-        sms_enabled=payload.get("sms_enabled"),
+        email=email,
+        email_enabled=email_enabled,
         watchlist=watchlist,
         criteria=payload.get("criteria"),
     )
 
 
-def _normalize_phone(raw: str) -> str:
-    digits = re.sub(r"\D", "", raw or "")
-    if len(digits) == 11 and digits.startswith("1"):
-        digits = digits[1:]
-    if digits and len(digits) != 10:
-        raise ValueError("Phone must be a 10-digit US number")
-    return digits
+def _normalize_email(raw: str) -> str:
+    addr = (raw or "").strip()
+    if not addr:
+        return ""
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", addr):
+        raise ValueError("Invalid email address")
+    return addr
 
 
 def _criteria_to_overrides(criteria: Dict[str, Any]) -> Dict[str, Any]:
@@ -82,7 +95,6 @@ def _criteria_to_overrides(criteria: Dict[str, Any]) -> Dict[str, Any]:
         "max_price_vs_ma200_pct", "min_iv_rank", "skip_earnings",
     ]
     overrides = {k: criteria[k] for k in keys if k in criteria}
-    # Custom ticker list: skip market-cap / analyst-upside gates that need broad universe
     overrides["max_results"] = 50
     overrides["max_symbols"] = max(len(criteria.get("watchlist") or []), 11)
     return overrides
@@ -217,55 +229,82 @@ def settle_expired_ideas(user_id: Optional[str] = None) -> int:
     return settled
 
 
-def format_sms(
+def format_alert_email(
     user_id: str,
     opportunities: List[Dict[str, Any]],
     *,
     top_n: int,
-) -> str:
+) -> Tuple[str, str]:
+    """Return (subject, plain_text_body)."""
     site = os.environ.get(SITE_URL_ENV, DEFAULT_SITE_URL).rstrip("/")
     try:
         from zoneinfo import ZoneInfo
-        stamp = datetime.now(ZoneInfo("America/Chicago")).strftime("%m/%d %H:%M CT")
+        stamp = datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d %H:%M CT")
     except Exception:
-        stamp = datetime.now().strftime("%m/%d %H:%M")
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
     if not opportunities:
-        return f"CSP alert {stamp}: 0 opportunities on your watchlist. {site}"
-    parts = []
-    for o in opportunities[:top_n]:
-        t = o.get("ticker")
-        k = o.get("put_strike")
-        exp = (o.get("expiration") or "")[5:]  # MM-DD
-        score = o.get("composite_score")
-        ann = o.get("annualized_return_pct")
-        parts.append(f"{t} ${k:g}p {exp} sc{score} ann{ann}%")
-    body = f"CSP {stamp}: " + " | ".join(parts)
+        subject = f"CSP alert: 0 opportunities ({stamp})"
+        body = (
+            f"CSP watchlist scan at {stamp}\n\n"
+            f"No opportunities matched your criteria.\n\n"
+            f"Open ledger: {site}/\n"
+        )
+        return subject, body
+
+    subject = f"CSP alert: {len(opportunities[:top_n])} idea(s) ({stamp})"
+    lines = [f"CSP watchlist scan at {stamp}", "", "Top ideas (paper, 1 contract):", ""]
+    for i, o in enumerate(opportunities[:top_n], 1):
+        lines.append(
+            f"{i}. {o.get('ticker')} ${o.get('put_strike')}p exp {o.get('expiration')}\n"
+            f"   premium ${o.get('premium_received')} | score {o.get('composite_score')} | "
+            f"ann {o.get('annualized_return_pct')}% | delta {o.get('delta')}"
+        )
     extra = len(opportunities) - top_n
     if extra > 0:
-        body += f" | +{extra} more"
-    body += f" {site}"
-    # SMS soft limit ~320 for concatenated; keep under ~300
-    return body[:300]
+        lines.append(f"\n(+{extra} more not listed)")
+    lines.extend(["", f"View CSP Alerts: {site}/", ""])
+    return subject, "\n".join(lines)
 
 
-def send_sms(phone: str, message: str) -> bool:
-    """Publish SMS via AWS SNS. Uses CSP_ALERTS_SNS_TOPIC_ARN if set; else direct SMS publish."""
-    if not phone:
-        log.warning("[CSP alerts] SMS skipped — no phone")
+def send_email(to_addr: str, subject: str, body: str) -> bool:
+    """Send via SMTP. Configure CSP_ALERTS_SMTP_* env vars (see docs/CSP_ALERTS.md)."""
+    if not to_addr:
+        log.warning("[CSP alerts] email skipped — no address")
         return False
-    e164 = f"+1{phone}" if not phone.startswith("+") else phone
-    topic = os.environ.get(SNS_TOPIC_ARN_ENV, "").strip()
+
+    host = os.environ.get(SMTP_HOST_ENV, "").strip()
+    user = os.environ.get(SMTP_USER_ENV, "").strip()
+    password = os.environ.get(SMTP_PASSWORD_ENV, "").strip()
+    from_addr = os.environ.get(SMTP_FROM_ENV, "").strip() or user
+    port = int(os.environ.get(SMTP_PORT_ENV, "587") or "587")
+
+    if not host or not user or not password or not from_addr:
+        log.error(
+            "[CSP alerts] email skipped — set %s, %s, %s, and optionally %s / %s",
+            SMTP_HOST_ENV, SMTP_USER_ENV, SMTP_PASSWORD_ENV, SMTP_FROM_ENV, SMTP_PORT_ENV,
+        )
+        return False
+
     try:
-        import boto3
-        client = boto3.client("sns")
-        if topic:
-            client.publish(TopicArn=topic, Message=message)
-        else:
-            client.publish(PhoneNumber=e164, Message=message)
-        log.info("[CSP alerts] SMS sent to %s (%d chars)", e164[-4:].rjust(4, "*"), len(message))
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = from_addr
+        msg["To"] = to_addr
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        with smtplib.SMTP(host, port, timeout=30) as server:
+            server.ehlo()
+            if port != 25:
+                server.starttls()
+                server.ehlo()
+            server.login(user, password)
+            server.sendmail(from_addr, [to_addr], msg.as_string())
+
+        log.info("[CSP alerts] email sent to %s subject=%r", to_addr, subject)
         return True
     except Exception as e:
-        log.error("[CSP alerts] SMS failed: %s", e)
+        log.error("[CSP alerts] email failed: %s", e)
         return False
 
 
@@ -273,13 +312,18 @@ def run_daily_scan(
     user_id: str,
     *,
     trigger_source: str = "cron",
-    send_sms_alert: bool = True,
+    send_email_alert: bool = True,
     refresh_marks: bool = True,
+    # backward-compatible alias
+    send_sms_alert: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Full pipeline for one user: settle expired → scan watchlist → persist top N → SMS → mark opens.
-    Always attempts SMS when enabled (including zero results).
+    Full pipeline for one user: settle expired → scan watchlist → persist top N → email → mark opens.
+    Always attempts email when enabled (including zero results).
     """
+    if send_sms_alert is not None:
+        send_email_alert = send_sms_alert
+
     uid = require_feature_user(user_id)
     settings = db.ensure_user_settings(uid)
     watchlist = settings["watchlist"] or list(db.DEFAULT_WATCHLIST)
@@ -290,15 +334,14 @@ def run_daily_scan(
     opportunities: List[Dict[str, Any]] = []
     top: List[Dict[str, Any]] = []
     inserted = 0
-    sms_sent = False
-    sms_body = None
+    email_sent = False
+    email_body = None
+    email_subject = None
     run_id = None
 
     try:
         settle_expired_ideas(uid)
         overrides = _criteria_to_overrides(criteria)
-        # Custom symbols: skip MA200 filter noise for ETFs by not applying sector/universe gates
-        # run_screener already treats custom_symbols specially
         result = run_screener(
             symbols=watchlist,
             max_results=50,
@@ -307,10 +350,8 @@ def run_daily_scan(
             stock_cache_snapshot=None,
         )
         opportunities = result.get("opportunities") or []
-        # Sort already by composite_score; take top_n unique tickers preferring best score
         top = _select_top(opportunities, top_n)
 
-        # Create run first so ideas can reference run_id
         run_id = db.create_scan_run(
             uid,
             symbols_scanned=len(watchlist),
@@ -325,18 +366,21 @@ def run_daily_scan(
             if db.upsert_tracked_idea(uid, run_id, opp):
                 inserted += 1
 
-        sms_body = format_sms(uid, top, top_n=top_n)
-        if send_sms_alert and settings.get("sms_enabled") and settings.get("phone"):
-            sms_sent = send_sms(settings["phone"], sms_body)
-        elif send_sms_alert and settings.get("sms_enabled") and not settings.get("phone"):
-            log.warning("[CSP alerts] SMS enabled but phone empty for %s", uid)
+        email_subject, email_body = format_alert_email(uid, top, top_n=top_n)
+        if send_email_alert and settings.get("email_enabled") and settings.get("email"):
+            email_sent = send_email(settings["email"], email_subject, email_body)
+        elif send_email_alert and settings.get("email_enabled") and not settings.get("email"):
+            log.warning("[CSP alerts] email enabled but address empty for %s", uid)
 
         if refresh_marks:
             mark_open_ideas(uid)
 
-        # Update run row with final SMS/insert counts (create a replacement note via new fields)
-        # Simplest: insert a corrected summary by updating — add update helper inline
-        _update_scan_run(run_id, ideas_inserted=inserted, sms_sent=sms_sent, sms_body=sms_body)
+        _update_scan_run(
+            run_id,
+            ideas_inserted=inserted,
+            sms_sent=email_sent,
+            sms_body=f"{email_subject}\n\n{email_body}" if email_body else None,
+        )
 
     except Exception as e:
         error = str(e)
@@ -352,10 +396,17 @@ def run_daily_scan(
                 error=error,
                 trigger_source=trigger_source,
             )
-        if send_sms_alert and settings.get("sms_enabled") and settings.get("phone"):
-            sms_body = f"CSP alert FAILED: {error[:180]}"
-            sms_sent = send_sms(settings["phone"], sms_body)
-            _update_scan_run(run_id, ideas_inserted=0, sms_sent=sms_sent, sms_body=sms_body, error=error)
+        if send_email_alert and settings.get("email_enabled") and settings.get("email"):
+            email_subject = "CSP alert FAILED"
+            email_body = f"CSP alert scan failed:\n\n{error}"
+            email_sent = send_email(settings["email"], email_subject, email_body)
+            _update_scan_run(
+                run_id,
+                ideas_inserted=0,
+                sms_sent=email_sent,
+                sms_body=email_body,
+                error=error,
+            )
 
     return {
         "user_id": uid,
@@ -364,8 +415,11 @@ def run_daily_scan(
         "opportunities_found": len(opportunities),
         "top": top,
         "ideas_inserted": inserted,
-        "sms_sent": sms_sent,
-        "sms_body": sms_body,
+        "email_sent": email_sent,
+        "sms_sent": email_sent,  # legacy alias for UI during transition
+        "email_subject": email_subject,
+        "email_body": email_body,
+        "sms_body": email_body,
         "error": error,
     }
 

@@ -215,12 +215,12 @@ export const getCspAlertIdeas = async (userId, { status, refresh } = {}) => {
   return response.data;
 };
 
-export const runCspAlertScan = async (userId, { send_sms = true } = {}) => {
+export const runCspAlertScan = async (userId, { send_email = true } = {}) => {
   const response = await axios.post(
     `${API_BASE_URL}/csp-alerts/run`,
     null,
     {
-      params: { user_id: userId, send_sms },
+      params: { user_id: userId, send_email },
       timeout: 300000,
     }
   );

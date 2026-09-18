@@ -978,7 +978,7 @@ async def get_csp_alert_settings(user_id: str):
 
 @app.put("/csp-alerts/settings")
 async def put_csp_alert_settings(user_id: str, payload: Dict[str, Any] = Body(...)):
-    """Update phone, SMS toggle, watchlist, and scanner criteria."""
+    """Update email, alert toggle, watchlist, and scanner criteria."""
     try:
         import csp_alerts_service as svc
         return svc.save_settings(user_id, payload or {})
@@ -1011,15 +1011,17 @@ async def get_csp_alert_ideas(
 @app.post("/csp-alerts/run")
 async def post_csp_alert_run(
     user_id: str,
-    send_sms: bool = True,
+    send_email: bool = True,
+    send_sms: Optional[bool] = None,
 ):
     """Manual scan now (same pipeline as the weekday cron). Can take several minutes."""
     try:
         import csp_alerts_service as svc
+        do_send = send_email if send_sms is None else send_sms
         return svc.run_daily_scan(
             user_id,
             trigger_source="manual",
-            send_sms_alert=send_sms,
+            send_email_alert=do_send,
             refresh_marks=True,
         )
     except PermissionError as e:

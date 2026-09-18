@@ -60,6 +60,7 @@ def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS csp_alert_settings (
                     user_id TEXT PRIMARY KEY,
                     phone TEXT NOT NULL DEFAULT '',
+                    email TEXT NOT NULL DEFAULT '',
                     sms_enabled INTEGER NOT NULL DEFAULT 1,
                     watchlist_json TEXT NOT NULL,
                     criteria_json TEXT NOT NULL,
@@ -113,6 +114,12 @@ def init_db() -> None:
                     ON csp_scan_runs(user_id, ran_at);
                 """
             )
+            # Migrate older DBs created before email column existed
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(csp_alert_settings)")}
+            if "email" not in cols:
+                conn.execute(
+                    "ALTER TABLE csp_alert_settings ADD COLUMN email TEXT NOT NULL DEFAULT ''"
+                )
             conn.commit()
         finally:
             conn.close()
@@ -133,8 +140,8 @@ def ensure_user_settings(user_id: str) -> Dict[str, Any]:
             conn.execute(
                 """
                 INSERT INTO csp_alert_settings
-                    (user_id, phone, sms_enabled, watchlist_json, criteria_json, updated_at)
-                VALUES (?, '', 1, ?, ?, ?)
+                    (user_id, phone, email, sms_enabled, watchlist_json, criteria_json, updated_at)
+                VALUES (?, '', '', 1, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -155,10 +162,13 @@ def ensure_user_settings(user_id: str) -> Dict[str, Any]:
 def _settings_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     watchlist = json.loads(row["watchlist_json"] or "[]")
     criteria = {**DEFAULT_CRITERIA, **json.loads(row["criteria_json"] or "{}")}
+    # sms_enabled column is reused as "email alerts enabled"
+    keys = row.keys()
+    email = row["email"] if "email" in keys else ""
     return {
         "user_id": row["user_id"],
-        "phone": row["phone"] or "",
-        "sms_enabled": bool(row["sms_enabled"]),
+        "email": email or "",
+        "email_enabled": bool(row["sms_enabled"]),
         "watchlist": watchlist,
         "criteria": criteria,
         "updated_at": row["updated_at"],
@@ -168,14 +178,14 @@ def _settings_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
 def update_user_settings(
     user_id: str,
     *,
-    phone: Optional[str] = None,
-    sms_enabled: Optional[bool] = None,
+    email: Optional[str] = None,
+    email_enabled: Optional[bool] = None,
     watchlist: Optional[List[str]] = None,
     criteria: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     current = ensure_user_settings(user_id)
-    new_phone = current["phone"] if phone is None else str(phone).strip()
-    new_sms = current["sms_enabled"] if sms_enabled is None else bool(sms_enabled)
+    new_email = current["email"] if email is None else str(email).strip()
+    new_enabled = current["email_enabled"] if email_enabled is None else bool(email_enabled)
     if watchlist is None:
         new_watch = current["watchlist"]
     else:
@@ -194,13 +204,13 @@ def update_user_settings(
             conn.execute(
                 """
                 UPDATE csp_alert_settings
-                SET phone = ?, sms_enabled = ?, watchlist_json = ?,
+                SET email = ?, sms_enabled = ?, watchlist_json = ?,
                     criteria_json = ?, updated_at = ?
                 WHERE user_id = ?
                 """,
                 (
-                    new_phone,
-                    1 if new_sms else 0,
+                    new_email,
+                    1 if new_enabled else 0,
                     json.dumps(new_watch),
                     json.dumps(new_crit),
                     now,
@@ -225,8 +235,8 @@ def _normalize_watchlist(raw: List[str]) -> List[str]:
     return out[:50]
 
 
-def list_users_with_sms() -> List[str]:
-    """Users who have SMS enabled and a phone number (for cron)."""
+def list_users_with_email() -> List[str]:
+    """Users who have email alerts enabled and an address (for cron)."""
     init_db()
     with _lock:
         conn = _connect()
@@ -234,7 +244,7 @@ def list_users_with_sms() -> List[str]:
             rows = conn.execute(
                 """
                 SELECT user_id FROM csp_alert_settings
-                WHERE sms_enabled = 1 AND TRIM(phone) != ''
+                WHERE sms_enabled = 1 AND TRIM(COALESCE(email, '')) != ''
                 """
             ).fetchall()
             return [r["user_id"] for r in rows]
