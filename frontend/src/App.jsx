@@ -29,11 +29,10 @@ function readStoredAuth() {
   return null;
 }
 
-function readStoredView(uid) {
+function readStoredView() {
   try {
     const saved = sessionStorage.getItem(VIEW_STORAGE_KEY);
     if (!saved || !VALID_VIEWS.includes(saved)) return null;
-    if ((saved === 'csp' || saved === 'cc') && uid !== 'nileshrb') return null;
     return saved;
   } catch (_) {}
   return null;
@@ -46,8 +45,7 @@ function App() {
   });
   const [userId, setUserId] = useState(() => readStoredAuth()?.userId ?? null);
   const [activeView, setActiveView] = useState(() => {
-    const auth = readStoredAuth();
-    return readStoredView(auth?.userId) ?? 'dashboard';
+    return readStoredView() ?? 'dashboard';
   });
   const [lastUpdated, setLastUpdated] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -217,30 +215,26 @@ function App() {
               >
                 Stocks Overview
               </button>
-              {userId === 'nileshrb' && (
-                <>
-                  <button
-                    onClick={() => setActiveView('csp')}
-                    className={`px-4 py-2 rounded-lg transition-colors ${
-                      activeView === 'csp'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-dark-surface text-dark-muted hover:bg-dark-border'
-                    }`}
-                  >
-                    Cash Secured Puts Strategy
-                  </button>
-                  <button
-                    onClick={() => setActiveView('cc')}
-                    className={`px-4 py-2 rounded-lg transition-colors ${
-                      activeView === 'cc'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-dark-surface text-dark-muted hover:bg-dark-border'
-                    }`}
-                  >
-                    Covered Calls Strategy
-                  </button>
-                </>
-              )}
+              <button
+                onClick={() => setActiveView('csp')}
+                className={`px-4 py-2 rounded-lg transition-colors ${
+                  activeView === 'csp'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-dark-surface text-dark-muted hover:bg-dark-border'
+                }`}
+              >
+                Cash Secured Puts Strategy
+              </button>
+              <button
+                onClick={() => setActiveView('cc')}
+                className={`px-4 py-2 rounded-lg transition-colors ${
+                  activeView === 'cc'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-dark-surface text-dark-muted hover:bg-dark-border'
+                }`}
+              >
+                Covered Calls Strategy
+              </button>
               <button
                 onClick={handleSignOut}
                 className="px-4 py-2 rounded-lg bg-dark-surface text-dark-muted hover:bg-dark-border transition-colors"
@@ -286,8 +280,8 @@ function App() {
         {activeView === 'stocks' && (
           <StocksOverview stocks={stocksData} dataRetrying={dataRetrying} />
         )}
-        {activeView === 'csp' && userId === 'nileshrb' && <CashSecuredPutsStrategy />}
-        {activeView === 'cc' && userId === 'nileshrb' && <CoveredCallsStrategy />}
+        {activeView === 'csp' && <CashSecuredPutsStrategy />}
+        {activeView === 'cc' && <CoveredCallsStrategy />}
       </main>
 
       {/* Footer with footnotes */}
