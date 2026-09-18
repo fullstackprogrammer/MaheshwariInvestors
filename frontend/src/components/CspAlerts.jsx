@@ -32,6 +32,46 @@ function fmtNum(v, digits = 2) {
   return Number(v).toFixed(digits);
 }
 
+function fmtPct(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '—';
+  const n = Number(v);
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${n.toFixed(2)}%`;
+}
+
+function cashInvested(row) {
+  const strike = Number(row?.put_strike);
+  if (!strike || Number.isNaN(strike)) return null;
+  return strike * 100; // 1 short put contract
+}
+
+function pnlDollars(row) {
+  if (row.status === 'settled') return row.settled_pnl;
+  if (row.status === 'open') return row.last_unrealized_pnl;
+  return null;
+}
+
+function pnlPctOfInvested(row) {
+  const invested = cashInvested(row);
+  const pnl = pnlDollars(row);
+  if (invested == null || invested === 0 || pnl === null || pnl === undefined) return null;
+  return (Number(pnl) / invested) * 100;
+}
+
+function fmtSuggestedAt(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('en-US', {
+    timeZone: 'America/Chicago',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }) + ' CT';
+}
+
 function pnlClass(v) {
   if (v === null || v === undefined) return 'text-dark-muted';
   if (v > 0) return 'text-emerald-400';
@@ -67,7 +107,7 @@ function CspAlerts({ userId }) {
       const [s, ledger] = await Promise.all([
         getCspAlertSettings(userId),
         getCspAlertIdeas(userId, {
-          status: statusFilter === 'all' ? undefined : statusFilter,
+          // Always load all ideas so summary tiles stay accurate; filter in the UI.
           refresh: refreshMarks,
         }),
       ]);
@@ -84,13 +124,21 @@ function CspAlerts({ userId }) {
     } finally {
       setLoading(false);
     }
-  }, [userId, statusFilter]);
+  }, [userId]);
 
   useEffect(() => {
     setLoading(true);
     loadAll();
   }, [loadAll]);
 
+  const visibleIdeas = statusFilter === 'all'
+    ? ideas
+    : ideas.filter((row) => row.status === statusFilter);
+
+  const totalInvested = ideas.reduce((sum, row) => sum + (cashInvested(row) || 0), 0);
+  const totalPnl =
+    (summary?.open_unrealized_pnl || 0) + (summary?.settled_realized_pnl || 0);
+  const totalPnlPct = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : null;
   const persistSettings = async () => {
     const watchlist = watchlistText.split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean);
     const saved = await updateCspAlertSettings(userId, {
@@ -300,7 +348,7 @@ function CspAlerts({ userId }) {
 
       {/* Summary */}
       {summary && (
-        <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
           <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
             <p className="text-xs text-dark-muted">Open ideas</p>
             <p className="text-xl text-white">{summary.open_count}</p>
@@ -312,6 +360,13 @@ function CspAlerts({ userId }) {
           <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
             <p className="text-xs text-dark-muted">Settled realized</p>
             <p className={`text-xl ${pnlClass(summary.settled_realized_pnl)}`}>{fmtMoney(summary.settled_realized_pnl)}</p>
+          </div>
+          <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
+            <p className="text-xs text-dark-muted">Total P/L %</p>
+            <p className={`text-xl ${pnlClass(totalPnlPct)}`}>{fmtPct(totalPnlPct)}</p>
+            <p className="text-xs text-dark-muted mt-1">
+              {fmtMoney(totalPnl)} on ${totalInvested.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+            </p>
           </div>
           <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
             <p className="text-xs text-dark-muted">Settled win rate</p>
@@ -346,36 +401,43 @@ function CspAlerts({ userId }) {
           <table className="w-full text-sm text-left">
             <thead className="text-dark-muted border-b border-dark-border">
               <tr>
-                <th className="px-3 py-2">Suggested</th>
+                <th className="px-3 py-2">Suggested (CT)</th>
                 <th className="px-3 py-2">Ticker</th>
                 <th className="px-3 py-2">Strike</th>
                 <th className="px-3 py-2">Expiry</th>
+                <th className="px-3 py-2">$ Invested</th>
                 <th className="px-3 py-2">Entry prem</th>
                 <th className="px-3 py-2">Entry spot</th>
                 <th className="px-3 py-2">Last spot</th>
                 <th className="px-3 py-2">Put mid</th>
-                <th className="px-3 py-2">Unrealized</th>
-                <th className="px-3 py-2">Settled</th>
+                <th className="px-3 py-2">Unrealized $</th>
+                <th className="px-3 py-2">Settled $</th>
+                <th className="px-3 py-2">P/L %</th>
                 <th className="px-3 py-2">Status</th>
               </tr>
             </thead>
             <tbody>
-              {ideas.length === 0 && (
+              {visibleIdeas.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="px-3 py-8 text-center text-dark-muted">
+                  <td colSpan={13} className="px-3 py-8 text-center text-dark-muted">
                     No tracked ideas yet. Save settings and run a scan.
                   </td>
                 </tr>
               )}
-              {ideas.map((row) => {
+              {visibleIdeas.map((row) => {
+                const invested = cashInvested(row);
+                const pct = pnlPctOfInvested(row);
                 return (
                   <tr key={row.id} className="border-b border-dark-border/60 text-white">
-                    <td className="px-3 py-2 whitespace-nowrap text-dark-muted">
-                      {row.suggested_at ? new Date(row.suggested_at).toLocaleDateString() : '—'}
+                    <td className="px-3 py-2 whitespace-nowrap text-dark-muted text-xs">
+                      {fmtSuggestedAt(row.suggested_at)}
                     </td>
                     <td className="px-3 py-2 font-medium">{row.ticker}</td>
                     <td className="px-3 py-2">{fmtNum(row.put_strike, 2)}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{row.expiration}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {invested == null ? '—' : `$${invested.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
+                    </td>
                     <td className="px-3 py-2">{fmtNum(row.entry_premium, 2)}</td>
                     <td className="px-3 py-2">{fmtNum(row.entry_spot, 2)}</td>
                     <td className="px-3 py-2">{fmtNum(row.last_spot, 2)}</td>
@@ -395,6 +457,9 @@ function CspAlerts({ userId }) {
                         '—'
                       )}
                     </td>
+                    <td className={`px-3 py-2 whitespace-nowrap ${pnlClass(pct)}`}>
+                      {fmtPct(pct)}
+                    </td>
                     <td className="px-3 py-2 capitalize text-dark-muted">
                       {row.status}
                       {row.settled_status ? ` (${row.settled_status.replace('expired_', '')})` : ''}
@@ -406,8 +471,9 @@ function CspAlerts({ userId }) {
           </table>
         </div>
         <p className="px-4 py-3 text-xs text-dark-muted border-t border-dark-border">
-          Paper P/L assumes 1 short put contract at the screener entry premium (bid). Live mark uses current put mid.
-          Settled P/L uses underlying close on expiry vs strike. Not brokerage fills.
+          Paper booking: 1 short put contract. <strong className="text-dark-muted">$ Invested</strong> = strike × 100 (cash secured).
+          Unrealized = (entry premium − put mid) × 100. <strong className="text-dark-muted">P/L %</strong> = P/L $ ÷ $ Invested.
+          Settled uses underlying close on expiry vs strike. Suggested times are America/Chicago.
         </p>
       </section>
     </div>
