@@ -4,6 +4,7 @@ import InvestorRankings from './components/InvestorRankings';
 import StocksOverview from './components/StocksOverview';
 import CashSecuredPutsStrategy from './components/CashSecuredPutsStrategy';
 import CoveredCallsStrategy from './components/CoveredCallsStrategy';
+import CspAlerts from './components/CspAlerts';
 import Login from './components/Login';
 import { checkHealth, getMetrics, getInvestorRankings, getStocks, getApiBaseUrl } from './services/api';
 
@@ -16,7 +17,9 @@ const AUTH_STORAGE_KEY = 'mai_auth';
 const VIEW_STORAGE_KEY = 'mai_view';
 const CSP_STORAGE_KEY = 'mai_csp_results';
 const CC_STORAGE_KEY = 'mai_cc_results';
-const VALID_VIEWS = ['dashboard', 'investors', 'stocks', 'csp', 'cc'];
+const VALID_VIEWS = ['dashboard', 'investors', 'stocks', 'csp', 'cc', 'csp-alerts'];
+/** Users who see CSP Alerts tab. Keep in sync with backend FEATURE_USERS. */
+const CSP_ALERTS_USERS = new Set(['nileshrb']);
 
 function readStoredAuth() {
   try {
@@ -29,10 +32,11 @@ function readStoredAuth() {
   return null;
 }
 
-function readStoredView() {
+function readStoredView(uid) {
   try {
     const saved = sessionStorage.getItem(VIEW_STORAGE_KEY);
     if (!saved || !VALID_VIEWS.includes(saved)) return null;
+    if (saved === 'csp-alerts' && !CSP_ALERTS_USERS.has(uid)) return null;
     return saved;
   } catch (_) {}
   return null;
@@ -45,7 +49,8 @@ function App() {
   });
   const [userId, setUserId] = useState(() => readStoredAuth()?.userId ?? null);
   const [activeView, setActiveView] = useState(() => {
-    return readStoredView() ?? 'dashboard';
+    const auth = readStoredAuth();
+    return readStoredView(auth?.userId) ?? 'dashboard';
   });
   const [lastUpdated, setLastUpdated] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -235,6 +240,18 @@ function App() {
               >
                 Covered Calls Strategy
               </button>
+              {CSP_ALERTS_USERS.has(userId) && (
+                <button
+                  onClick={() => setActiveView('csp-alerts')}
+                  className={`px-4 py-2 rounded-lg transition-colors ${
+                    activeView === 'csp-alerts'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-dark-surface text-dark-muted hover:bg-dark-border'
+                  }`}
+                >
+                  CSP Alerts
+                </button>
+              )}
               <button
                 onClick={handleSignOut}
                 className="px-4 py-2 rounded-lg bg-dark-surface text-dark-muted hover:bg-dark-border transition-colors"
@@ -282,6 +299,9 @@ function App() {
         )}
         {activeView === 'csp' && <CashSecuredPutsStrategy />}
         {activeView === 'cc' && <CoveredCallsStrategy />}
+        {activeView === 'csp-alerts' && CSP_ALERTS_USERS.has(userId) && (
+          <CspAlerts userId={userId} />
+        )}
       </main>
 
       {/* Footer with footnotes */}

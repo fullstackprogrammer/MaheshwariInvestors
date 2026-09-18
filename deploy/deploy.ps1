@@ -56,7 +56,11 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 # 3. Optionally sync backend + data
 if ($BackendToo) {
     Write-Host "Syncing backend and data..." -ForegroundColor Cyan
-    & scp -i $KEY_PATH -r "$RepoRoot\backend\main.py" "$RepoRoot\backend\requirements.txt" "$RepoRoot\backend\response_cache.py" "$RepoRoot\backend\csp_universe.py" "$RepoRoot\backend\csp_screener.py" "$RepoRoot\backend\csp_math.py" "$RepoRoot\backend\csp_cache.py" "${EC2_USER}@${EC2_IP}:${RemoteAppDir}/backend/"
+    & scp -i $KEY_PATH -r "$RepoRoot\backend\main.py" "$RepoRoot\backend\requirements.txt" "$RepoRoot\backend\response_cache.py" "$RepoRoot\backend\csp_universe.py" "$RepoRoot\backend\csp_screener.py" "$RepoRoot\backend\csp_math.py" "$RepoRoot\backend\csp_cache.py" "$RepoRoot\backend\csp_alerts_db.py" "$RepoRoot\backend\csp_alerts_service.py" "${EC2_USER}@${EC2_IP}:${RemoteAppDir}/backend/"
+    if (Test-Path "$RepoRoot\backend\scripts\csp_daily_alert.py") {
+        & ssh -i $KEY_PATH "${EC2_USER}@${EC2_IP}" "mkdir -p ${RemoteAppDir}/backend/scripts"
+        & scp -i $KEY_PATH "$RepoRoot\backend\scripts\csp_daily_alert.py" "${EC2_USER}@${EC2_IP}:${RemoteAppDir}/backend/scripts/"
+    }
     if (Test-Path "$RepoRoot\data") {
         & scp -i $KEY_PATH -r "$RepoRoot\data" "${EC2_USER}@${EC2_IP}:${RemoteAppDir}/"
     }

@@ -55,8 +55,12 @@ if [ "$BACKEND_TOO" = true ]; then
     "$REPO_ROOT/backend/response_cache.py" \
     "$REPO_ROOT/backend/csp_universe.py" "$REPO_ROOT/backend/csp_screener.py" \
     "$REPO_ROOT/backend/csp_math.py" "$REPO_ROOT/backend/csp_cache.py" \
+    "$REPO_ROOT/backend/csp_alerts_db.py" "$REPO_ROOT/backend/csp_alerts_service.py" \
     "$REPO_ROOT/backend/covered_calls_screener.py" \
     "${EC2_USER}@${EC2_IP}:${REMOTE_APP_DIR}/backend/"
+  ssh -i "$KEY_PATH" "${EC2_USER}@${EC2_IP}" "mkdir -p ${REMOTE_APP_DIR}/backend/scripts"
+  scp -i "$KEY_PATH" "$REPO_ROOT/backend/scripts/csp_daily_alert.py" \
+    "${EC2_USER}@${EC2_IP}:${REMOTE_APP_DIR}/backend/scripts/"
   [ -d "$REPO_ROOT/data" ] && scp -i "$KEY_PATH" -r "$REPO_ROOT/data" "${EC2_USER}@${EC2_IP}:${REMOTE_APP_DIR}/"
   [ -f "$REPO_ROOT/DFWInvestors2026StockPicks.csv" ] && scp -i "$KEY_PATH" "$REPO_ROOT/DFWInvestors2026StockPicks.csv" "${EC2_USER}@${EC2_IP}:${REMOTE_APP_DIR}/"
 fi

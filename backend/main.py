@@ -5,10 +5,10 @@ Analyzes investor stock picks and tracks 2026 performance using live market data
 
 import logging
 import sys
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, date, timezone
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Any
 import pandas as pd
 import yfinance as yf
 from collections import defaultdict
@@ -521,6 +521,12 @@ def calculate_portfolio_metrics(investor: Dict, cache_only: bool = True) -> Dict
 async def startup_event():
     """Load data, start server immediately; warm cache in background so /health responds right away."""
     load_investors_from_csv()
+    try:
+        import csp_alerts_db
+        csp_alerts_db.init_db()
+        log.info("CSP alerts DB ready at %s", csp_alerts_db.DB_PATH)
+    except Exception as e:
+        log.warning("CSP alerts DB init skipped: %s", e)
     refresh_thread = threading.Thread(target=_background_refresh_loop, daemon=True)
     refresh_thread.start()
     log.info("Startup complete; server ready. Cache warming in background (2-3 min); /health and data endpoints will return 503 until then.")
@@ -952,3 +958,73 @@ async def get_covered_calls_ideas(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Covered calls screener error: {str(e)}")
+
+
+# --- CSP Alerts (per-user watchlist, SMS, paper P&L ledger) ---
+
+@app.get("/csp-alerts/settings")
+async def get_csp_alert_settings(user_id: str):
+    """Load CSP Alerts settings for a user (feature-gated)."""
+    try:
+        import csp_alerts_service as svc
+        return svc.get_settings(user_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/csp-alerts/settings")
+async def put_csp_alert_settings(user_id: str, payload: Dict[str, Any] = Body(...)):
+    """Update phone, SMS toggle, watchlist, and scanner criteria."""
+    try:
+        import csp_alerts_service as svc
+        return svc.save_settings(user_id, payload or {})
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/csp-alerts/ideas")
+async def get_csp_alert_ideas(
+    user_id: str,
+    status: Optional[str] = None,
+    refresh: bool = False,
+):
+    """Tracked paper CSP ideas with P&L summary. refresh=1 marks/settles before return."""
+    try:
+        import csp_alerts_service as svc
+        return svc.list_ideas_for_user(user_id, status=status, refresh=refresh)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/csp-alerts/run")
+async def post_csp_alert_run(
+    user_id: str,
+    send_sms: bool = True,
+):
+    """Manual scan now (same pipeline as the weekday cron). Can take several minutes."""
+    try:
+        import csp_alerts_service as svc
+        return svc.run_daily_scan(
+            user_id,
+            trigger_source="manual",
+            send_sms_alert=send_sms,
+            refresh_marks=True,
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"CSP alert run failed: {e}")

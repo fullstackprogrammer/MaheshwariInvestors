@@ -185,3 +185,44 @@ export const getIndexPerformance = async () => {
   });
   return response.data;
 };
+
+/** CSP Alerts — settings / ledger / manual run (feature-gated on backend). */
+export const getCspAlertSettings = async (userId) => {
+  const response = await axios.get(`${API_BASE_URL}/csp-alerts/settings`, {
+    params: { user_id: userId },
+    timeout: 15000,
+  });
+  return response.data;
+};
+
+export const updateCspAlertSettings = async (userId, payload) => {
+  const response = await axios.put(`${API_BASE_URL}/csp-alerts/settings`, payload, {
+    params: { user_id: userId },
+    timeout: 15000,
+  });
+  return response.data;
+};
+
+export const getCspAlertIdeas = async (userId, { status, refresh } = {}) => {
+  const response = await axios.get(`${API_BASE_URL}/csp-alerts/ideas`, {
+    params: {
+      user_id: userId,
+      status: status || undefined,
+      refresh: refresh ? true : undefined,
+    },
+    timeout: refresh ? 180000 : 30000,
+  });
+  return response.data;
+};
+
+export const runCspAlertScan = async (userId, { send_sms = true } = {}) => {
+  const response = await axios.post(
+    `${API_BASE_URL}/csp-alerts/run`,
+    null,
+    {
+      params: { user_id: userId, send_sms },
+      timeout: 300000,
+    }
+  );
+  return response.data;
+};
