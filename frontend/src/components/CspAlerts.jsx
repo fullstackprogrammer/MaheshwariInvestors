@@ -23,8 +23,10 @@ const CRITERIA_FIELDS = [
 function fmtMoney(v) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return '—';
   const n = Number(v);
-  const sign = n > 0 ? '+' : '';
-  return `${sign}$${n.toFixed(2)}`;
+  const abs = Math.abs(n).toFixed(2);
+  if (n > 0) return `+$${abs}`;
+  if (n < 0) return `-$${abs}`;
+  return `$${abs}`;
 }
 
 function fmtNum(v, digits = 2) {
@@ -51,11 +53,35 @@ function pnlDollars(row) {
   return null;
 }
 
-function pnlPctOfInvested(row) {
-  const invested = cashInvested(row);
+function premiumCredit(row) {
+  const prem = Number(row?.entry_premium);
+  if (!prem || Number.isNaN(prem)) return null;
+  return prem * 100; // dollars received for 1 contract
+}
+
+/** % of the opening credit captured (or lost). +100% means the put can be bought back for $0. */
+function glPctOfCredit(row) {
+  const credit = premiumCredit(row);
   const pnl = pnlDollars(row);
-  if (invested == null || invested === 0 || pnl === null || pnl === undefined) return null;
-  return (Number(pnl) / invested) * 100;
+  if (credit == null || credit === 0 || pnl === null || pnl === undefined) return null;
+  return (Number(pnl) / credit) * 100;
+}
+
+/**
+ * Mark-to-market value of the short put, as a negative number (cost to buy it back).
+ * Approaches 0 when the put is cheap to close.
+ */
+function currentShortValue(row) {
+  if (row.status === 'settled') return 0;
+  if (row.last_put_mid === null || row.last_put_mid === undefined || Number.isNaN(Number(row.last_put_mid))) {
+    return null;
+  }
+  return -Number(row.last_put_mid) * 100;
+}
+
+function fmtRate(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '—';
+  return `${Number(v).toFixed(1)}%`;
 }
 
 function fmtSuggestedAt(iso) {
@@ -135,10 +161,13 @@ function CspAlerts({ userId }) {
     ? ideas
     : ideas.filter((row) => row.status === statusFilter);
 
-  const totalInvested = ideas.reduce((sum, row) => sum + (cashInvested(row) || 0), 0);
+  const totalCredit = ideas.reduce((sum, row) => sum + (premiumCredit(row) || 0), 0);
   const totalPnl =
     (summary?.open_unrealized_pnl || 0) + (summary?.settled_realized_pnl || 0);
-  const totalPnlPct = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : null;
+  const totalGlPct = totalCredit > 0 ? (totalPnl / totalCredit) * 100 : null;
+  const openBuyToClose = ideas
+    .filter((row) => row.status === 'open')
+    .reduce((sum, row) => sum + (currentShortValue(row) || 0), 0);
   const persistSettings = async () => {
     const watchlist = watchlistText.split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean);
     const saved = await updateCspAlertSettings(userId, {
@@ -348,7 +377,7 @@ function CspAlerts({ userId }) {
 
       {/* Summary */}
       {summary && (
-        <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
             <p className="text-xs text-dark-muted">Open ideas</p>
             <p className="text-xl text-white">{summary.open_count}</p>
@@ -362,11 +391,16 @@ function CspAlerts({ userId }) {
             <p className={`text-xl ${pnlClass(summary.settled_realized_pnl)}`}>{fmtMoney(summary.settled_realized_pnl)}</p>
           </div>
           <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
-            <p className="text-xs text-dark-muted">Total P/L %</p>
-            <p className={`text-xl ${pnlClass(totalPnlPct)}`}>{fmtPct(totalPnlPct)}</p>
+            <p className="text-xs text-dark-muted">Total % G/L</p>
+            <p className={`text-xl ${pnlClass(totalGlPct)}`}>{fmtPct(totalGlPct)}</p>
             <p className="text-xs text-dark-muted mt-1">
-              {fmtMoney(totalPnl)} on ${totalInvested.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+              {fmtMoney(totalPnl)} of ${totalCredit.toLocaleString('en-US', { maximumFractionDigits: 0 })} credit
             </p>
+          </div>
+          <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
+            <p className="text-xs text-dark-muted">Open value (buy to close)</p>
+            <p className={`text-xl ${pnlClass(openBuyToClose)}`}>{fmtMoney(openBuyToClose)}</p>
+            <p className="text-xs text-dark-muted mt-1">Closer to $0 = cheaper to close</p>
           </div>
           <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
             <p className="text-xs text-dark-muted">Settled win rate</p>
@@ -410,23 +444,26 @@ function CspAlerts({ userId }) {
                 <th className="px-3 py-2">Entry spot</th>
                 <th className="px-3 py-2">Last spot</th>
                 <th className="px-3 py-2">Put mid</th>
+                <th className="px-3 py-2">Ann. % at open</th>
                 <th className="px-3 py-2">Unrealized $</th>
                 <th className="px-3 py-2">Settled $</th>
-                <th className="px-3 py-2">P/L %</th>
+                <th className="px-3 py-2">% G/L</th>
+                <th className="px-3 py-2">Current value</th>
                 <th className="px-3 py-2">Status</th>
               </tr>
             </thead>
             <tbody>
               {visibleIdeas.length === 0 && (
                 <tr>
-                  <td colSpan={13} className="px-3 py-8 text-center text-dark-muted">
+                  <td colSpan={15} className="px-3 py-8 text-center text-dark-muted">
                     No tracked ideas yet. Save settings and run a scan.
                   </td>
                 </tr>
               )}
               {visibleIdeas.map((row) => {
                 const invested = cashInvested(row);
-                const pct = pnlPctOfInvested(row);
+                const glPct = glPctOfCredit(row);
+                const currentValue = currentShortValue(row);
                 return (
                   <tr key={row.id} className="border-b border-dark-border/60 text-white">
                     <td className="px-3 py-2 whitespace-nowrap text-dark-muted text-xs">
@@ -442,6 +479,9 @@ function CspAlerts({ userId }) {
                     <td className="px-3 py-2">{fmtNum(row.entry_spot, 2)}</td>
                     <td className="px-3 py-2">{fmtNum(row.last_spot, 2)}</td>
                     <td className="px-3 py-2">{fmtNum(row.last_put_mid, 2)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-white">
+                      {fmtRate(row.entry_ann_return_pct)}
+                    </td>
                     <td className={`px-3 py-2 ${pnlClass(row.status === 'open' ? row.last_unrealized_pnl : null)}`}>
                       {row.status === 'open' ? fmtMoney(row.last_unrealized_pnl) : '—'}
                     </td>
@@ -457,8 +497,14 @@ function CspAlerts({ userId }) {
                         '—'
                       )}
                     </td>
-                    <td className={`px-3 py-2 whitespace-nowrap ${pnlClass(pct)}`}>
-                      {fmtPct(pct)}
+                    <td className={`px-3 py-2 whitespace-nowrap ${pnlClass(glPct)}`}>
+                      {fmtPct(glPct)}
+                    </td>
+                    <td
+                      className={`px-3 py-2 whitespace-nowrap ${pnlClass(currentValue)}`}
+                      title="Short put mark. Buy to close when this is close to $0."
+                    >
+                      {fmtMoney(currentValue)}
                     </td>
                     <td className="px-3 py-2 capitalize text-dark-muted">
                       {row.status}
@@ -471,9 +517,11 @@ function CspAlerts({ userId }) {
           </table>
         </div>
         <p className="px-4 py-3 text-xs text-dark-muted border-t border-dark-border">
-          Paper booking: 1 short put contract. <strong className="text-dark-muted">$ Invested</strong> = strike × 100 (cash secured).
-          Unrealized = (entry premium − put mid) × 100. <strong className="text-dark-muted">P/L %</strong> = P/L $ ÷ $ Invested.
-          Settled uses underlying close on expiry vs strike. Suggested times are America/Chicago.
+          Paper booking: 1 short put. <strong className="text-dark-muted">$ Invested</strong> = strike × 100.
+          <strong className="text-dark-muted">Ann. % at open</strong> is the annualized return when the idea was suggested.
+          <strong className="text-dark-muted">% G/L</strong> = P/L $ ÷ premium collected (not cash secured).
+          <strong className="text-dark-muted">Current value</strong> = −(put mid × 100); closer to $0 means cheaper to buy the put back.
+          Suggested times are America/Chicago.
         </p>
       </section>
     </div>
