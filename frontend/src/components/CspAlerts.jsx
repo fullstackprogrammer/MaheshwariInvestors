@@ -79,6 +79,45 @@ function currentShortValue(row) {
   return -Number(row.last_put_mid) * 100;
 }
 
+/** Calendar days the idea has been on the book. Settled ideas stop at settlement. */
+function daysOnBook(row) {
+  const start = row?.suggested_at ? new Date(row.suggested_at) : null;
+  if (!start || Number.isNaN(start.getTime())) return null;
+  let end = new Date();
+  if (row.status === 'settled') {
+    const settled = row.settled_at
+      ? new Date(row.settled_at)
+      : (row.expiration ? new Date(`${row.expiration}T21:00:00Z`) : null);
+    if (settled && !Number.isNaN(settled.getTime())) end = settled;
+  }
+  return Math.max((end.getTime() - start.getTime()) / 86400000, 1);
+}
+
+/**
+ * Current P/L on cash secured, annualized the same way as the screener:
+ * (P/L $ / (strike × 100)) × (365 / days since suggested).
+ */
+function annualizedReturnPct(row) {
+  const cash = cashInvested(row);
+  const pnl = pnlDollars(row);
+  const days = daysOnBook(row);
+  if (cash == null || cash === 0 || pnl === null || pnl === undefined || days == null) return null;
+  return (Number(pnl) / cash) * (365 / days) * 100;
+}
+
+function portfolioAnnualizedPct(rows) {
+  let weighted = 0;
+  let weight = 0;
+  for (const row of rows) {
+    const cash = cashInvested(row);
+    const ann = annualizedReturnPct(row);
+    if (cash == null || ann == null) continue;
+    weighted += ann * cash;
+    weight += cash;
+  }
+  return weight > 0 ? weighted / weight : null;
+}
+
 function fmtRate(v) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return '—';
   return `${Number(v).toFixed(1)}%`;
@@ -119,6 +158,7 @@ function CspAlerts({ userId }) {
   const [summary, setSummary] = useState(null);
   const [latestRun, setLatestRun] = useState(null);
   const [statusFilter, setStatusFilter] = useState('all');
+  const [sortConfig, setSortConfig] = useState({ key: 'suggested_at', direction: 'desc' });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
@@ -161,10 +201,43 @@ function CspAlerts({ userId }) {
     ? ideas
     : ideas.filter((row) => row.status === statusFilter);
 
-  const totalCredit = ideas.reduce((sum, row) => sum + (premiumCredit(row) || 0), 0);
+  const handleSort = (key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key && prev.direction === 'asc') return { key, direction: 'desc' };
+      if (prev.key === key && prev.direction === 'desc') return { key, direction: 'asc' };
+      return { key, direction: 'asc' };
+    });
+  };
+
+  const sortValue = (row, key) => {
+    if (key === 'invested') return cashInvested(row);
+    if (key === 'gl_pct') return glPctOfCredit(row);
+    if (key === 'current_value') return currentShortValue(row);
+    return row[key];
+  };
+
+  const sortedIdeas = [...visibleIdeas].sort((a, b) => {
+    const aVal = sortValue(a, sortConfig.key);
+    const bVal = sortValue(b, sortConfig.key);
+    const aMissing = aVal === null || aVal === undefined || aVal === '';
+    const bMissing = bVal === null || bVal === undefined || bVal === '';
+    if (aMissing && bMissing) return 0;
+    if (aMissing) return 1;
+    if (bMissing) return -1;
+    const cmp = typeof aVal === 'string' && typeof bVal === 'string'
+      ? aVal.localeCompare(bVal)
+      : (aVal < bVal ? -1 : aVal > bVal ? 1 : 0);
+    return sortConfig.direction === 'asc' ? cmp : -cmp;
+  });
+
+  const getSortIcon = (key) => (
+    sortConfig.key !== key ? '↕' : sortConfig.direction === 'asc' ? '↑' : '↓'
+  );
+  const thClass = 'px-3 py-2 cursor-pointer hover:bg-dark-border transition-colors select-none';
+
   const totalPnl =
     (summary?.open_unrealized_pnl || 0) + (summary?.settled_realized_pnl || 0);
-  const totalGlPct = totalCredit > 0 ? (totalPnl / totalCredit) * 100 : null;
+  const totalAnnPct = portfolioAnnualizedPct(ideas);
   const openBuyToClose = ideas
     .filter((row) => row.status === 'open')
     .reduce((sum, row) => sum + (currentShortValue(row) || 0), 0);
@@ -391,10 +464,10 @@ function CspAlerts({ userId }) {
             <p className={`text-xl ${pnlClass(summary.settled_realized_pnl)}`}>{fmtMoney(summary.settled_realized_pnl)}</p>
           </div>
           <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
-            <p className="text-xs text-dark-muted">Total % G/L</p>
-            <p className={`text-xl ${pnlClass(totalGlPct)}`}>{fmtPct(totalGlPct)}</p>
+            <p className="text-xs text-dark-muted">Annualized return</p>
+            <p className={`text-xl ${pnlClass(totalAnnPct)}`}>{fmtPct(totalAnnPct)}</p>
             <p className="text-xs text-dark-muted mt-1">
-              {fmtMoney(totalPnl)} of ${totalCredit.toLocaleString('en-US', { maximumFractionDigits: 0 })} credit
+              {fmtMoney(totalPnl)} on cash secured, scaled to a year
             </p>
           </div>
           <div className="bg-dark-surface border border-dark-border rounded-lg p-4">
@@ -413,8 +486,8 @@ function CspAlerts({ userId }) {
       )}
 
       {/* Ledger */}
-      <section className="bg-dark-surface border border-dark-border rounded-lg overflow-hidden">
-        <div className="px-4 py-3 border-b border-dark-border flex flex-wrap items-center justify-between gap-2">
+      <section className="border border-dark-border rounded-lg overflow-hidden">
+        <div className="px-4 py-3 border-b border-dark-border bg-dark-surface flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-lg font-medium text-white">Tracked ideas (paper)</h3>
           <div className="flex gap-2 text-sm">
             {['all', 'open', 'settled'].map((s) => (
@@ -433,59 +506,59 @@ function CspAlerts({ userId }) {
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left">
-            <thead className="text-dark-muted border-b border-dark-border">
-              <tr>
-                <th className="px-3 py-2">Suggested (CT)</th>
-                <th className="px-3 py-2">Ticker</th>
-                <th className="px-3 py-2">Strike</th>
-                <th className="px-3 py-2">Expiry</th>
-                <th className="px-3 py-2">$ Invested</th>
-                <th className="px-3 py-2">Entry prem</th>
-                <th className="px-3 py-2">Entry spot</th>
-                <th className="px-3 py-2">Last spot</th>
-                <th className="px-3 py-2">Put mid</th>
-                <th className="px-3 py-2">Ann. % at open</th>
-                <th className="px-3 py-2">Unrealized $</th>
-                <th className="px-3 py-2">Settled $</th>
-                <th className="px-3 py-2">% G/L</th>
-                <th className="px-3 py-2">Current value</th>
-                <th className="px-3 py-2">Status</th>
+            <thead className="text-dark-muted">
+              <tr className="bg-dark-surface border-b border-dark-border">
+                <th className={`${thClass} text-left`} onClick={() => handleSort('suggested_at')}>Suggested (CT) {getSortIcon('suggested_at')}</th>
+                <th className={`${thClass} text-left`} onClick={() => handleSort('ticker')}>Ticker {getSortIcon('ticker')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('put_strike')}>Strike {getSortIcon('put_strike')}</th>
+                <th className={`${thClass} text-left`} onClick={() => handleSort('expiration')}>Expiry {getSortIcon('expiration')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('invested')}>$ Invested {getSortIcon('invested')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('entry_premium')}>Entry prem {getSortIcon('entry_premium')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('entry_spot')}>Entry spot {getSortIcon('entry_spot')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('last_spot')}>Last spot {getSortIcon('last_spot')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('last_put_mid')}>Put mid {getSortIcon('last_put_mid')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('entry_ann_return_pct')}>Ann. % at open {getSortIcon('entry_ann_return_pct')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('last_unrealized_pnl')}>Unrealized $ {getSortIcon('last_unrealized_pnl')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('settled_pnl')}>Settled $ {getSortIcon('settled_pnl')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('gl_pct')}>% G/L {getSortIcon('gl_pct')}</th>
+                <th className={`${thClass} text-right`} onClick={() => handleSort('current_value')}>Current value {getSortIcon('current_value')}</th>
+                <th className={`${thClass} text-left`} onClick={() => handleSort('status')}>Status {getSortIcon('status')}</th>
               </tr>
             </thead>
             <tbody>
-              {visibleIdeas.length === 0 && (
+              {sortedIdeas.length === 0 && (
                 <tr>
                   <td colSpan={15} className="px-3 py-8 text-center text-dark-muted">
                     No tracked ideas yet. Save settings and run a scan.
                   </td>
                 </tr>
               )}
-              {visibleIdeas.map((row) => {
+              {sortedIdeas.map((row) => {
                 const invested = cashInvested(row);
                 const glPct = glPctOfCredit(row);
                 const currentValue = currentShortValue(row);
                 return (
-                  <tr key={row.id} className="border-b border-dark-border/60 text-white">
+                  <tr key={row.id} className="border-b border-dark-border hover:bg-dark-surface transition-colors text-white">
                     <td className="px-3 py-2 whitespace-nowrap text-dark-muted text-xs">
                       {fmtSuggestedAt(row.suggested_at)}
                     </td>
                     <td className="px-3 py-2 font-medium">{row.ticker}</td>
-                    <td className="px-3 py-2">{fmtNum(row.put_strike, 2)}</td>
+                    <td className="px-3 py-2 text-right">{fmtNum(row.put_strike, 2)}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{row.expiration}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">
+                    <td className="px-3 py-2 text-right whitespace-nowrap">
                       {invested == null ? '—' : `$${invested.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
                     </td>
-                    <td className="px-3 py-2">{fmtNum(row.entry_premium, 2)}</td>
-                    <td className="px-3 py-2">{fmtNum(row.entry_spot, 2)}</td>
-                    <td className="px-3 py-2">{fmtNum(row.last_spot, 2)}</td>
-                    <td className="px-3 py-2">{fmtNum(row.last_put_mid, 2)}</td>
-                    <td className="px-3 py-2 whitespace-nowrap text-white">
+                    <td className="px-3 py-2 text-right">{fmtNum(row.entry_premium, 2)}</td>
+                    <td className="px-3 py-2 text-right">{fmtNum(row.entry_spot, 2)}</td>
+                    <td className="px-3 py-2 text-right">{fmtNum(row.last_spot, 2)}</td>
+                    <td className="px-3 py-2 text-right">{fmtNum(row.last_put_mid, 2)}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap text-white">
                       {fmtRate(row.entry_ann_return_pct)}
                     </td>
-                    <td className={`px-3 py-2 ${pnlClass(row.status === 'open' ? row.last_unrealized_pnl : null)}`}>
+                    <td className={`px-3 py-2 text-right ${pnlClass(row.status === 'open' ? row.last_unrealized_pnl : null)}`}>
                       {row.status === 'open' ? fmtMoney(row.last_unrealized_pnl) : '—'}
                     </td>
-                    <td className={`px-3 py-2 ${pnlClass(row.settled_pnl)}`}>
+                    <td className={`px-3 py-2 text-right ${pnlClass(row.settled_pnl)}`}>
                       {row.status === 'settled' ? (
                         <span title={row.settled_status || ''}>
                           {fmtMoney(row.settled_pnl)}
@@ -497,11 +570,11 @@ function CspAlerts({ userId }) {
                         '—'
                       )}
                     </td>
-                    <td className={`px-3 py-2 whitespace-nowrap ${pnlClass(glPct)}`}>
+                    <td className={`px-3 py-2 text-right whitespace-nowrap ${pnlClass(glPct)}`}>
                       {fmtPct(glPct)}
                     </td>
                     <td
-                      className={`px-3 py-2 whitespace-nowrap ${pnlClass(currentValue)}`}
+                      className={`px-3 py-2 text-right whitespace-nowrap ${pnlClass(currentValue)}`}
                       title="Short put mark. Buy to close when this is close to $0."
                     >
                       {fmtMoney(currentValue)}
